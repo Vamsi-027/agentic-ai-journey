@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-ai-journey"
+version = "0.1.0"
+description = "Repository for Vamsi's Agentic AI Mastery learning journey and projects"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic",
+    "python-dotenv",
+    "backoff",
+    "pyyaml",
+    "torch",
+    "tiktoken",
+    "kagglehub",
+    "numpy",
+    "pandas",
+    "matplotlib"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

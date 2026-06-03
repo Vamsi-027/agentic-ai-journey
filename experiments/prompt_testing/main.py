@@ -1,11 +1,7 @@
-# pyrefly: ignore [missing-import]
-from anthropic import Anthropic
-from dotenv import load_dotenv
-import os
+from src.core.client import AgenticClient
 
-load_dotenv()
-
-client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+# Initialize the centralized core client, which handles secrets, logging, and rate-limit retries
+client = AgenticClient()
 
 message = client.messages.create(
     model="claude-sonnet-4-6",

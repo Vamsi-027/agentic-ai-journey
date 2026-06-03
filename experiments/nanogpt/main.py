@@ -108,12 +108,12 @@ print(f"Validation samples: {len(val_data)}")
 context_size = 8
 train_data[: context_size + 1]
 
-x = train_data[:context_size]
-y = train_data[1 : context_size + 1]
-for t in range(context_size):
-    context = x[: t + 1]
-    target = y[t]
-    print(f"when input is {context} the target: {target}")
+# x = train_data[:context_size]
+# y = train_data[1 : context_size + 1]
+# for t in range(context_size):
+#     context = x[: t + 1]
+#     target = y[t]
+#     print(f"when input is {context} the target: {target}")
 
 torch.manual_seed(1337)
 # Note: batch_size and block_size are defined globally
@@ -165,7 +165,7 @@ class BigramLanguageModel(nn.Module):
             # Get the predictions
             logits, loss = self(idx)
             # Focus only on the last time step
-            logits = logits[:, -1, :]  # becomes (B, C
+            logits = logits[:, -1, :]  # becomes (B, C)
             probs = F.softmax(logits, dim=-1)  # (B, C)
             # Sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
@@ -223,11 +223,13 @@ print(
 )
 
 
-log_file = "app.log"
+# Resolve standard log path relative to workspace root
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+log_file = os.path.join(ROOT_DIR, "data", "app.log")
+
 if os.path.exists(log_file):
     print(f"Reading {log_file}...\n" + "-" * 30)
     with open(log_file, "r") as f:
         print(f.read())
 else:
-    print(f"Error: {log_file} not found in the current directory.")
-    print("Available files:", os.listdir("."))
+    print(f"Note: Log file {log_file} not yet created.")

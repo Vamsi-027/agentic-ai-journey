@@ -1,62 +1,61 @@
 import os
 import uuid
-import sqlite3
 import json
 import time
 import random
+import yaml
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dotenv import load_dotenv
-from anthropic import Anthropic
+from src.core.client import AgenticClient
+from src.core.database import init_db, log_result_to_db
 
-# Load environment variables
-load_dotenv()
+# Resolve workspace root and load decoupled prompts from prompts/concept_explanations.yaml
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROMPTS_PATH = os.path.join(ROOT_DIR, "prompts", "concept_explanations.yaml")
 
-# Verify API key
-api_key = os.getenv("ANTHROPIC_API_KEY")
-if not api_key:
-    raise ValueError("ANTHROPIC_API_KEY not found. Please set it in your .env file.")
+with open(PROMPTS_PATH, "r", encoding="utf-8") as f:
+    prompts_config = yaml.safe_load(f)
 
-# Define prompt template
-PROMPT_TEMPLATE = """Explain the concept of {concept} to a {target_audience}."""
+# Load prompt template from config
+PROMPT_TEMPLATE = prompts_config["templates"]["explanation"]
 
-# Define variants to test (including the three new experiments)
+# Define variants using prompts loaded from YAML configuration
 VARIANTS = [
     {
         "name": "Sonnet-Factual",
         "model": "claude-sonnet-4-6",
         "temperature": 0.0,
-        "system_prompt": "You are a precise, academic scientist. Explain concepts technically and factually.",
+        "system_prompt": prompts_config["system_prompts"]["Sonnet-Factual"],
         "max_tokens": 4000,
     },
     {
         "name": "Sonnet-Creative",
         "model": "claude-sonnet-4-6",
         "temperature": 0.7,
-        "system_prompt": "You are an imaginative storyteller. Explain concepts using vivid analogies and simple metaphors.",
+        "system_prompt": prompts_config["system_prompts"]["Sonnet-Creative"],
         "max_tokens": 4000,
-        "repeats": 5,  # Experiment 3: Run this variant 5 times to test repeatability
+        "repeats": 5,  # Run this variant 5 times to test repeatability
     },
     {
         "name": "Haiku-Concise",
         "model": "claude-haiku-4-5-20251001",
         "temperature": 0.2,
-        "system_prompt": "You are a concise assistant. Provide explanations in under 100 words.",
+        "system_prompt": prompts_config["system_prompts"]["Haiku-Concise"],
         "max_tokens": 1000,
     },
     {
         "name": "Haiku-Factual",
         "model": "claude-haiku-4-5-20251001",
         "temperature": 0.0,
-        "system_prompt": "You are a precise, academic scientist. Explain concepts technically and factually.",
-        "max_tokens": 1000,  # Experiment 1: Haiku with Sonnet-Factual system prompt
+        "system_prompt": prompts_config["system_prompts"]["Haiku-Factual"],
+        "max_tokens": 1000,
     },
     {
         "name": "Haiku-PlainProse",
         "model": "claude-haiku-4-5-20251001",
         "temperature": 0.2,
-        "system_prompt": "Respond in plain prose only. No markdown, no headers, no bullets. Under 100 words.",
-        "max_tokens": 200,  # Experiment 2: Markdown Ban with a small token budget
+        "system_prompt": prompts_config["system_prompts"]["Haiku-PlainProse"],
+        "max_tokens": 200,
     },
 ]
 
@@ -66,88 +65,6 @@ TEST_INPUTS = [
     {"concept": "Neural Networks", "target_audience": "software engineer"},
     {"concept": "Inflation", "target_audience": "high school student"},
 ]
-
-
-def init_db(db_path="prompt_experiments.db"):
-    """Initializes the SQLite database. Upgrades legacy table if needed."""
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    # Check if table exists and has 'run_id'
-    cursor.execute("PRAGMA table_info(experiments)")
-    columns = [col[1] for col in cursor.fetchall()]
-
-    if columns and "run_id" not in columns:
-        print(
-            "⚠️ Legacy database schema detected. Re-creating the table with the new schema..."
-        )
-        cursor.execute("DROP TABLE experiments")
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS experiments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id TEXT,
-            timestamp TEXT,
-            prompt_template TEXT,
-            test_inputs_json TEXT,
-            variant_name TEXT,
-            model TEXT,
-            temperature REAL,
-            system_prompt TEXT,
-            max_tokens INTEGER,
-            status TEXT,
-            latency REAL,
-            input_tokens INTEGER,
-            output_tokens INTEGER,
-            total_tokens INTEGER,
-            stop_reason TEXT,
-            truncated INTEGER,
-            response TEXT,
-            error TEXT,
-            accuracy_score INTEGER DEFAULT NULL,
-            clarity_score INTEGER DEFAULT NULL
-        )
-    """)
-    conn.commit()
-    return conn
-
-
-def log_result_to_db(
-    conn, run_id, timestamp, prompt_template, test_input, variant, res
-):
-    """Inserts a single run's results into the database."""
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO experiments (
-            run_id, timestamp, prompt_template, test_inputs_json, variant_name, 
-            model, temperature, system_prompt, max_tokens, status, 
-            latency, input_tokens, output_tokens, total_tokens, stop_reason,
-            truncated, response, error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """,
-        (
-            run_id,
-            timestamp,
-            prompt_template,
-            json.dumps(test_input),
-            variant["name"],
-            variant["model"],
-            variant["temperature"],
-            variant["system_prompt"],
-            variant.get("max_tokens", 1000),
-            res["status"],
-            res["latency"],
-            res.get("input_tokens", 0),
-            res.get("output_tokens", 0),
-            res.get("total_tokens", 0),
-            res.get("stop_reason", ""),
-            res.get("truncated", 0),
-            res["response"],
-            res["error"],
-        ),
-    )
-    conn.commit()
 
 
 def run_single_experiment(client, variant, test_input, repeat_idx):
@@ -173,83 +90,63 @@ def run_single_experiment(client, variant, test_input, repeat_idx):
             **variant,
         }
 
-    # Retry logic parameters
-    max_retries = 5
-    backoff = 2.0
+    try:
+        # Call core AgenticClient wrapper which has built-in backoff logic
+        response = client.messages.create(
+            model=variant["model"],
+            max_tokens=max_tok,
+            temperature=variant["temperature"],
+            system=variant["system_prompt"],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
 
-    for attempt in range(max_retries):
-        try:
-            # Call Anthropic API
-            response = client.messages.create(
-                model=variant["model"],
-                max_tokens=max_tok,
-                temperature=variant["temperature"],
-                system=variant["system_prompt"],
-                messages=[{"role": "user", "content": user_prompt}],
-            )
+        latency = time.time() - start_time
+        response_text = response.content[0].text
 
-            latency = time.time() - start_time
-            response_text = response.content[0].text
+        # Token tracking
+        input_tokens = response.usage.input_tokens
+        output_tokens = response.usage.output_tokens
+        total_tokens = input_tokens + output_tokens
 
-            # Token tracking
-            input_tokens = response.usage.input_tokens
-            output_tokens = response.usage.output_tokens
-            total_tokens = input_tokens + output_tokens
+        # Stop reason and truncation flag
+        stop_reason = getattr(response, "stop_reason", "")
+        truncated = 1 if stop_reason == "max_tokens" else 0
 
-            # Stop reason and truncation flag
-            stop_reason = getattr(response, "stop_reason", "")
-            truncated = 1 if stop_reason == "max_tokens" else 0
+        return {
+            "status": "Success",
+            "error": "",
+            "latency": round(latency, 2),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "stop_reason": stop_reason,
+            "truncated": truncated,
+            "response": response_text,
+            "test_input": test_input,
+            "repeat_idx": repeat_idx,
+            **variant,
+        }
 
-            return {
-                "status": "Success",
-                "error": "",
-                "latency": round(latency, 2),
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": total_tokens,
-                "stop_reason": stop_reason,
-                "truncated": truncated,
-                "response": response_text,
-                "test_input": test_input,
-                "repeat_idx": repeat_idx,
-                **variant,
-            }
-
-        except Exception as e:
-            # Detect Rate Limit (HTTP 429 or class name)
-            is_rate_limit = False
-            if hasattr(e, "status_code") and e.status_code == 429:
-                is_rate_limit = True
-            elif "rate_limit" in str(e).lower() or "429" in str(e):
-                is_rate_limit = True
-
-            if is_rate_limit and attempt < max_retries - 1:
-                # Backoff with jitter
-                sleep_time = backoff + random.uniform(0.5, 1.5)
-                time.sleep(sleep_time)
-                backoff *= 2
-                continue
-
-            # Non-rate-limit error or we ran out of retries
-            latency = time.time() - start_time
-            return {
-                "status": "Error",
-                "error": str(e),
-                "latency": round(latency, 2),
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-                "stop_reason": "error",
-                "truncated": 0,
-                "response": "",
-                "test_input": test_input,
-                "repeat_idx": repeat_idx,
-                **variant,
-            }
+    except Exception as e:
+        latency = time.time() - start_time
+        return {
+            "status": "Error",
+            "error": str(e),
+            "latency": round(latency, 2),
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "stop_reason": "error",
+            "truncated": 0,
+            "response": "",
+            "test_input": test_input,
+            "repeat_idx": repeat_idx,
+            **variant,
+        }
 
 
 def print_summary_table(results):
-    """Prints a beautiful summary table of all experiments to the console."""
+    """Prints a summary table of all experiments to the console."""
     print("\n" + "=" * 123)
     print("📊 EXPERIMENT RUN SUMMARY REPORT")
     print("=" * 123)
@@ -361,11 +258,11 @@ def print_summary_table(results):
 
 
 def main():
-    client = Anthropic(api_key=api_key)
+    # Use centralized AgenticClient wrapper
+    client = AgenticClient()
 
-    # Initialize SQLite Database
-    db_path = "prompt_experiments.db"
-    conn = init_db(db_path)
+    # Initialize SQLite Database at the centralized location (data/prompt_experiments.db)
+    conn = init_db()
 
     # Generate unique run ID
     run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -410,7 +307,7 @@ def main():
                 res = future.result()
                 results.append(res)
 
-                # Log result to SQLite
+                # Log result to centralized SQLite DB
                 log_result_to_db(
                     conn, run_id, timestamp, PROMPT_TEMPLATE, test_input, variant, res
                 )
@@ -444,9 +341,9 @@ def main():
     # Print the summary report
     print_summary_table(results)
 
-    print(
-        f"🎉 All experiment records have been logged to the SQLite database: {db_path}\n"
-    )
+    # Print centralized DB reference
+    db_path = os.path.join(ROOT_DIR, "data", "prompt_experiments.db")
+    print(f"🎉 All experiment records have been logged to the SQLite database: {db_path}\n")
 
 
 if __name__ == "__main__":
