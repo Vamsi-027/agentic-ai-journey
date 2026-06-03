@@ -1,0 +1,22 @@
+# Environment variables
+.env
+
+# Virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Experiment Database & Reports
+prompt_experiments.db
+experiment_results_*.csv
+
+# OS specific files
+.DS_Store
+.localized
+Thumbs.db
