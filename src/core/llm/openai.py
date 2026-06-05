@@ -11,9 +11,12 @@ class OpenAIClient(BaseLLMClient):
     """Async LLM Client wrapping the OpenAI API. Includes backoff retry and token cost tracking."""
 
     def __init__(self, api_key: Optional[str] = None):
+        super().__init__()
+        from src.core.llm.base import LLMProvider
         # Allow passing custom key, fallback to loaded settings
         self.client = AsyncOpenAI(api_key=api_key or settings.OPENAI_API_KEY)
         self.default_model = OpenAIModel.GPT_4O.value
+        self.provider = LLMProvider.OPENAI
 
     @backoff.on_exception(
         backoff.expo,
@@ -138,6 +141,12 @@ class OpenAIClient(BaseLLMClient):
                     stop_reason=finish_reason
                 )
 
+    @backoff.on_exception(
+        backoff.expo,
+        (openai.RateLimitError, openai.APIConnectionError, openai.APIStatusError),
+        max_tries=3,
+        jitter=backoff.full_jitter
+    )
     async def generate_with_tools(
         self,
         prompt: str,
@@ -147,5 +156,68 @@ class OpenAIClient(BaseLLMClient):
         temperature: float = 0.0,
         max_tokens: int = 1000
     ) -> LLMResponse:
-        """Asynchronously call OpenAI completions API with tools. (Not implemented)"""
-        raise NotImplementedError("generate_with_tools is not implemented for OpenAIClient yet.")
+        """Asynchronously call OpenAI completions API with tools."""
+        target_model = model or self.default_model
+        if hasattr(target_model, "value"):
+            target_model = target_model.value
+        
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        if isinstance(prompt, list):
+            messages.extend(prompt)
+        else:
+            messages.append({"role": "user", "content": prompt})
+
+        formatted_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema
+                }
+            }
+            for tool in tools
+        ]
+
+        response = await self.client.chat.completions.create(
+            model=target_model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=formatted_tools
+        )
+        
+        message = response.choices[0].message
+        text = message.content or ""
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        cost = calculate_cost(target_model, input_tokens, output_tokens)
+
+        tool_calls = []
+        if message.tool_calls:
+            for tc in message.tool_calls:
+                import json
+                try:
+                    arguments = json.loads(tc.function.arguments)
+                except Exception:
+                    arguments = {}
+                tool_calls.append(
+                    ToolCall(
+                        id=tc.id,
+                        name=tc.function.name,
+                        arguments=arguments
+                    )
+                )
+
+        return LLMResponse(
+            text=text,
+            model=target_model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+            tool_calls=tool_calls,
+            is_final=True,
+            stop_reason=response.choices[0].finish_reason
+        )

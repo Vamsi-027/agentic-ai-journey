@@ -87,3 +87,12 @@ While this client provides a lightweight, unified interface, scaling it to suppo
 2. **Middleware Pipeline for Hooks (Observability / Caching):** I'd introduce a middleware/interceptor chain (similar to gRPC interceptors). This would decouple cross-cutting concerns like semantic caching (e.g. Redis), request validation, prompt security sanitization, and database auditing without polluting the `generate()` call loop.
 3. **Dynamic Pricing Provider:** Currently, model prices are hardcoded inside `tracker.py`. In production, these should be loaded from a config service, a remote registry, or cached from a database/API. This prevents codebase redeployments when vendors adjust prices or introduce dynamic caching discounts (like Claude's prompt caching).
 4. **Provider-Agnostic Context Window Management:** Currently, if context limits are exceeded, client calls simply fail at the API level. I would implement an optional, configurable `ContextManager` wrapper that transparently handles message truncating, summary compilation, or token sliding windows for chat sessions.
+5. **Parallel Tool Execution:** The multi-turn loop executes tool calls sequentially. In high-concurrency systems, parallel tool calls returned by the model should be resolved concurrently via `asyncio.gather(*tasks)` to minimize roundtrip latencies.
+6. **Path & Environment Sandboxing:** The filesystem and python execution tools run on the host system. For security, we should run python code in containerized/WASM environments and sandbox file storage paths.
+
+---
+
+## Tool Registry & Loop Design Decisions
+
+For detailed design decisions about the registry pattern, termination conditions, and graceful tool error handling, refer to [tool_client.md](file:///Users/vamsi_cheruku/Desktop/Agentic%20AI%20Journey/src/core/llm/tool_client.md).
+

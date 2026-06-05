@@ -11,8 +11,11 @@ class ClaudeClient(BaseLLMClient):
     """Async LLM Client wrapping the Anthropic API. Includes backoff retry and token cost tracking."""
 
     def __init__(self, api_key: Optional[str] = None):
+        super().__init__()
+        from src.core.llm.base import LLMProvider
         self.client = AsyncAnthropic(api_key=api_key or settings.ANTHROPIC_API_KEY)
         self.default_model = ClaudeModel.CLAUDE_3_5_SONNET.value
+        self.provider = LLMProvider.CLAUDE
 
     @backoff.on_exception(
         backoff.expo,

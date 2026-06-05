@@ -11,6 +11,16 @@ from src.core.llm.base import (
 from src.core.llm.claude import ClaudeClient
 from src.core.llm.openai import OpenAIClient
 from src.core.llm.chat import ChatSession
+from src.core.llm.tools import (
+    WRITE_FILE_TOOL,
+    READ_FILE_TOOL,
+    RUN_PYTHON_TOOL,
+    SEARCH_WEB_TOOL,
+    write_file,
+    read_file,
+    run_python,
+    search_web
+)
 
 __all__ = [
     "BaseLLMClient",
@@ -23,7 +33,15 @@ __all__ = [
     "ClaudeClient",
     "OpenAIClient",
     "ChatSession",
-    "get_llm_client"
+    "get_llm_client",
+    "WRITE_FILE_TOOL",
+    "READ_FILE_TOOL",
+    "RUN_PYTHON_TOOL",
+    "SEARCH_WEB_TOOL",
+    "write_file",
+    "read_file",
+    "run_python",
+    "search_web"
 ]
 
 def get_llm_client(

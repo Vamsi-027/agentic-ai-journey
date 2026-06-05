@@ -102,20 +102,51 @@ async def test_claude_generate_with_tools(mock_async_anthropic, mock_tool_use_re
 
 
 # -----------------------------------------------------------------------------
-# 4. Test OpenAI Client generate_with_tools() NotImplementedError
+# 4. Test OpenAI Client generate_with_tools()
 # -----------------------------------------------------------------------------
 @patch("src.core.llm.openai.AsyncOpenAI")
-async def test_openai_generate_with_tools_raises_not_implemented(mock_async_openai):
-    """Verify that OpenAIClient.generate_with_tools raises NotImplementedError."""
-    mock_async_openai.return_value = MagicMock()
+async def test_openai_generate_with_tools_success(mock_async_openai):
+    """Verify that OpenAIClient.generate_with_tools formats tools and parses tool calls."""
+    # 1. Setup mock structures
+    mock_tc = MagicMock()
+    mock_tc.id = "call_openai_123"
+    mock_tc.function.name = "test_tool"
+    mock_tc.function.arguments = '{"arg": "value"}'
     
+    mock_message = MagicMock()
+    mock_message.content = "Opening file..."
+    mock_message.tool_calls = [mock_tc]
+    
+    mock_choice = MagicMock()
+    mock_choice.message = mock_message
+    mock_choice.finish_reason = "tool_calls"
+    
+    mock_usage = MagicMock()
+    mock_usage.prompt_tokens = 12
+    mock_usage.completion_tokens = 18
+    
+    mock_response = MagicMock()
+    mock_response.choices = [mock_choice]
+    mock_response.usage = mock_usage
+    
+    mock_client = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+    mock_async_openai.return_value = mock_client
+    
+    # 2. Initialize and call
     client = get_llm_client(provider=LLMProvider.OPENAI, api_key="test-api-key")
-    tool = ToolDefinition(name="test", description="desc", input_schema={})
+    tool = ToolDefinition(name="test_tool", description="desc", input_schema={"type": "object"})
     
-    with pytest.raises(NotImplementedError) as exc_info:
-        await client.generate_with_tools(prompt="Test", tools=[tool])
-        
-    assert "not implemented" in str(exc_info.value).lower()
+    response = await client.generate_with_tools(prompt="Test", tools=[tool])
+    
+    # 3. Assertions
+    assert response.text == "Opening file..."
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0].id == "call_openai_123"
+    assert response.tool_calls[0].name == "test_tool"
+    assert response.tool_calls[0].arguments == {"arg": "value"}
+    assert response.input_tokens == 12
+    assert response.output_tokens == 18
 
 
 # -----------------------------------------------------------------------------

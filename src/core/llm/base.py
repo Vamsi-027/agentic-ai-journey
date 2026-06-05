@@ -1,8 +1,9 @@
 import asyncio
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import AsyncGenerator, Generator, Optional
+from typing import AsyncGenerator, Generator, Optional, Callable
 
 class LLMProvider(str, Enum):
     """Supported LLM providers."""
@@ -55,6 +56,167 @@ class LLMResponse:
 
 class BaseLLMClient(ABC):
     """Abstract base class that all provider clients must implement. Exposes async and sync interfaces."""
+
+    def __init__(self):
+        self.registry: dict[str, tuple[ToolDefinition, Callable]] = {}
+        self.provider: Optional[LLMProvider] = None
+
+    def register_tool(self, tool_def: ToolDefinition, func: Callable):
+        """Registers a ToolDefinition alongside its executable Python function."""
+        self.registry[tool_def.name] = (tool_def, func)
+
+    async def dispatch(self, tool_name: str, arguments: dict) -> str:
+        """Invokes a registered tool by name with arguments, returning string representation of output."""
+        if tool_name not in self.registry:
+            raise KeyError(f"Tool '{tool_name}' not found in registry.")
+        _, func = self.registry[tool_name]
+        
+        if asyncio.iscoroutinefunction(func):
+            result = await func(**arguments)
+        else:
+            result = func(**arguments)
+        return str(result)
+
+    async def run_with_tools(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1000,
+        max_turns: int = 10
+    ) -> LLMResponse:
+        """Asynchronously executes the full LLM-tool loop, running tools and feeding results back until completion."""
+        # 1. Prepare message history starting with the user prompt
+        messages = [{"role": "user", "content": prompt}]
+        
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_cost_usd = 0.0
+        
+        turn = 0
+        while turn < max_turns:
+            # 2. Get registered tool definitions
+            tool_definitions = [tool_def for tool_def, _ in self.registry.values()]
+            
+            # If no tools are registered, run standard generate
+            if not tool_definitions:
+                response = await self.generate(
+                    prompt=messages if turn > 0 else prompt,
+                    system_prompt=system_prompt,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                total_input_tokens += response.input_tokens
+                total_output_tokens += response.output_tokens
+                total_cost_usd += response.cost_usd
+                response.input_tokens = total_input_tokens
+                response.output_tokens = total_output_tokens
+                response.cost_usd = total_cost_usd
+                return response
+
+            # 3. Call generate_with_tools
+            response = await self.generate_with_tools(
+                prompt=messages,
+                tools=tool_definitions,
+                system_prompt=system_prompt,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            
+            total_input_tokens += response.input_tokens
+            total_output_tokens += response.output_tokens
+            total_cost_usd += response.cost_usd
+            
+            # If the model didn't call any tools, we are done
+            if not response.tool_calls:
+                response.input_tokens = total_input_tokens
+                response.output_tokens = total_output_tokens
+                response.cost_usd = total_cost_usd
+                return response
+            
+            # 4. Process tool calls and append to message history
+            if self.provider == LLMProvider.CLAUDE or self.provider == LLMProvider.ANTHROPIC:
+                # Format assistant message with text & tool_use content blocks
+                assistant_content = []
+                if response.text:
+                    assistant_content.append({"type": "text", "text": response.text})
+                for tool_call in response.tool_calls:
+                    assistant_content.append({
+                        "type": "tool_use",
+                        "id": tool_call.id,
+                        "name": tool_call.name,
+                        "input": tool_call.arguments
+                    })
+                messages.append({"role": "assistant", "content": assistant_content})
+                
+                # Format user message with tool_result content blocks
+                user_content = []
+                for tool_call in response.tool_calls:
+                    try:
+                        tool_result = await self.dispatch(tool_call.name, tool_call.arguments)
+                        is_error = False
+                    except KeyError as ke:
+                        # Clean exception for unknown tool name
+                        raise ke
+                    except Exception as e:
+                        # Graceful handling for tool execution error
+                        tool_result = f"Error executing tool: {str(e)}"
+                        is_error = True
+                    
+                    user_content.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_call.id,
+                        "content": tool_result,
+                        "is_error": is_error
+                    })
+                messages.append({"role": "user", "content": user_content})
+                
+            elif self.provider == LLMProvider.OPENAI:
+                # Format assistant message with tool_calls
+                messages.append({
+                    "role": "assistant",
+                    "content": response.text,
+                    "tool_calls": [
+                        {
+                            "id": tool_call.id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_call.name,
+                                "arguments": json.dumps(tool_call.arguments)
+                            }
+                        }
+                        for tool_call in response.tool_calls
+                    ]
+                })
+                
+                # Format a tool role message for each tool call
+                for tool_call in response.tool_calls:
+                    try:
+                        tool_result = await self.dispatch(tool_call.name, tool_call.arguments)
+                    except KeyError as ke:
+                        raise ke
+                    except Exception as e:
+                        tool_result = f"Error executing tool: {str(e)}"
+                    
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_call.name,
+                        "content": tool_result
+                    })
+            else:
+                raise ValueError(f"Unsupported provider: {self.provider}")
+            
+            turn += 1
+            
+        # If we exceeded max_turns, return the last response with accumulated metadata
+        response.input_tokens = total_input_tokens
+        response.output_tokens = total_output_tokens
+        response.cost_usd = total_cost_usd
+        return response
 
     @abstractmethod
     async def generate(
