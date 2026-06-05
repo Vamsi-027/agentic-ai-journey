@@ -153,3 +153,8 @@ cython_debug/
 # Application logs
 *.log
 data/
+
+# Transient task files
+X.txt
+Y.txt
+search_result.txt
