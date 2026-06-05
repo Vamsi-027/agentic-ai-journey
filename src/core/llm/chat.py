@@ -23,8 +23,8 @@ class ChatSession:
         """Sends a user message asynchronously, updates chat history, and returns the response."""
         self.history.append({"role": "user", "content": message})
         
-        response = await self.client.generate(
-            prompt=self.history,
+        response = await self.client.chat(
+            messages=self.history,
             system_prompt=self.system_prompt,
             model=self.model,
             temperature=self.temperature,

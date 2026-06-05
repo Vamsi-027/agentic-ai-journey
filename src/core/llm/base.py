@@ -219,6 +219,18 @@ class BaseLLMClient(ABC):
         return response
 
     @abstractmethod
+    async def chat(
+        self,
+        messages: list[dict],
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1000
+    ) -> LLMResponse:
+        """Asynchronously sends a full conversation history (list[dict]) to the LLM."""
+        pass
+
+    @abstractmethod
     async def generate(
         self,
         prompt: str,

@@ -58,6 +58,11 @@ async def run_tasks():
     task1_prompt = f"Read the file '{x_path}', summarize its key points in one sentence, and write that summary to the file '{y_path}'."
     task1_result = await agent.run(task1_prompt)
     
+    print(f"\n📊 Task 1 Execution Summary:")
+    print(f"Success: {task1_result.success}")
+    print(f"Total Steps: {task1_result.total_steps}")
+    print(f"Final Answer: {task1_result.answer}")
+    
     # Check if Y.txt exists and output its content
     if os.path.exists(y_path):
         with open(y_path, "r", encoding="utf-8") as f:
@@ -79,6 +84,11 @@ async def run_tasks():
     )
     task2_result = await agent.run(task2_prompt)
     
+    print(f"\n📊 Task 2 Execution Summary:")
+    print(f"Success: {task2_result.success}")
+    print(f"Total Steps: {task2_result.total_steps}")
+    print(f"Final Answer: {task2_result.answer}")
+    
     # ==========================================================================
     # TASK 3: A 3-step chain of your choice (Search -> Write -> Read & Print Uppercase)
     # ==========================================================================
@@ -91,6 +101,11 @@ async def run_tasks():
         f"3. Run a Python script via the run_python tool to read '{search_result_path}' and print its content in UPPERCASE."
     )
     task3_result = await agent.run(task3_prompt)
+    
+    print(f"\n📊 Task 3 Execution Summary:")
+    print(f"Success: {task3_result.success}")
+    print(f"Total Steps: {task3_result.total_steps}")
+    print(f"Final Answer: {task3_result.answer}")
 
 
 if __name__ == "__main__":

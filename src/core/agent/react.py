@@ -4,12 +4,14 @@ import asyncio
 from typing import Optional, Union, Tuple
 from src.core.llm import BaseLLMClient, ToolDefinition
 
-REACT_SYSTEM_PROMPT = """You are an autonomous agent executing a task. You use a Thought, Action, Observation loop to solve tasks step-by-step.
+from dataclasses import dataclass
+
+REACT_SYSTEM_PROMPT_TEMPLATE = """You are an autonomous agent executing a task. You use a Thought, Action, Observation loop to solve tasks step-by-step.
 
 For each turn, you MUST output exactly one Thought and one Action (or Final Answer) in the following format:
 
 Thought: <your reasoning about what you need to do next>
-Action: <tool_name> <a single-line JSON object containing the tool arguments>
+Action: <tool_name> <arguments_json>
 
 After your Action, the user/system will execute the tool and provide you with an:
 Observation: <result of the tool execution>
@@ -20,15 +22,21 @@ Final Answer: <your final answer to the user>
 
 Rules:
 1. You MUST only output ONE Thought and ONE Action per turn. Never output multiple actions.
-2. The Action block arguments MUST be a single-line valid JSON object. E.g. Action: write_file {"path": "test.txt", "content": "hello"}
+2. The Action block arguments MUST be a valid JSON object. E.g. Action: write_file {"path": "test.txt", "content": "hello"}
 3. If you do not need to call any more tools, you MUST output 'Final Answer: <your final response>' to terminate the loop.
 
 Available Tools:
-- write_file: Write content to a file. Arguments: {"path": "string", "content": "string"}
-- read_file: Read and return complete content of a file. Arguments: {"path": "string"}
-- run_python: Run Python code block in a subprocess with a timeout and get stdout/stderr. Arguments: {"code": "string"}
-- search_web: Search the web for a query (currently a stub). Arguments: {"query": "string"}
+{{TOOLS}}
 """
+
+REACT_SYSTEM_PROMPT = REACT_SYSTEM_PROMPT_TEMPLATE
+
+@dataclass
+class AgentResult:
+    answer: str
+    steps: list[dict]   # each: {"step": int, "thought": str, "action": str, "observation": str}
+    success: bool
+    total_steps: int
 
 def parse_react_action(text: str) -> Tuple[str, str, dict]:
     """Parses LLM output text for Action or Final Answer blocks.
@@ -42,7 +50,7 @@ def parse_react_action(text: str) -> Tuple[str, str, dict]:
         - "none": no parseable block was found
     """
     # Look for Action: tool_name {"args": ...}
-    action_match = re.search(r"Action:\s*(\w+)\s*(\{.*\})", text)
+    action_match = re.search(r"Action:\s*(\w+)\s*(\{.*?\})", text, re.DOTALL)
     if action_match:
         tool_name = action_match.group(1).strip()
         args_str = action_match.group(2).strip()
@@ -61,25 +69,36 @@ def parse_react_action(text: str) -> Tuple[str, str, dict]:
 
 
 class ReActAgent:
-    """An autonomous agent implementing a pure Python text-based ReAct loop."""
+    """An autonomous agent implementing a pure Python text-based ReAct(Reason + Act) loop."""
 
-    def __init__(self, client: BaseLLMClient, model: Optional[str] = None, system_prompt: str = REACT_SYSTEM_PROMPT, max_steps: int = 10):
+    def __init__(self, client: BaseLLMClient, model: Optional[str] = None, system_prompt: Optional[str] = None, max_steps: int = 10):
         self.client = client
         self.model = model
-        self.system_prompt = system_prompt
+        self.system_prompt = system_prompt or REACT_SYSTEM_PROMPT_TEMPLATE
         self.max_steps = max_steps
 
-    async def run(self, task: str) -> str:
+    def _build_system_prompt(self) -> str:
+        tools_section = "\n".join(
+            f"- {name}: {tool_def.description} Arguments: {json.dumps({k: v.get('type', 'string') for k, v in tool_def.input_schema.get('properties', {}).items()})}"
+            for name, (tool_def, _) in self.client.registry.items()
+        )
+        if "{{TOOLS}}" in self.system_prompt:
+            return self.system_prompt.replace("{{TOOLS}}", tools_section)
+        return self.system_prompt
+
+    async def run(self, task: str) -> AgentResult:
         """Runs the ReAct loop to complete the given task, logging each intermediate step."""
         messages = [{"role": "user", "content": f"Task: {task}"}]
+        steps = []
+        sys_prompt = self._build_system_prompt()
         
         for step in range(self.max_steps):
             print(f"\n🚀 === [AGENT STEP {step + 1}] ===")
             
             # 1. Generate next step
-            response = await self.client.generate(
-                prompt=messages,
-                system_prompt=self.system_prompt,
+            response = await self.client.chat(
+                messages=messages,
+                system_prompt=sys_prompt,
                 model=self.model,
                 temperature=0.0
             )
@@ -89,16 +108,32 @@ class ReActAgent:
             # Append agent response to history
             messages.append({"role": "assistant", "content": llm_output})
             
+            # Extract Thought
+            thought_match = re.search(r"Thought:\s*(.*?)(?=\s*(Action:|Final Answer:|$))", llm_output, re.DOTALL)
+            thought_text = thought_match.group(1).strip() if thought_match else llm_output.strip()
+            
             # 2. Parse the step
             status, value, args = parse_react_action(llm_output)
             
             if status == "final":
                 print(f"✅ Final Answer Reached: {value}")
-                return value
+                steps.append({
+                    "step": step + 1,
+                    "thought": thought_text,
+                    "action": f"Final Answer: {value}",
+                    "observation": ""
+                })
+                return AgentResult(answer=value, steps=steps, success=True, total_steps=len(steps))
                 
             elif status == "error":
-                observation = f"Error: Action arguments must be a single-line valid JSON object. Got parsing error for: {args['raw_args']}"
+                observation = f"Error: Action arguments must be a valid JSON object. Got parsing error for: {args['raw_args']}"
                 print(f"❌ {observation}")
+                steps.append({
+                    "step": step + 1,
+                    "thought": thought_text,
+                    "action": f"Error Action: {value}",
+                    "observation": observation
+                })
                 messages.append({"role": "user", "content": f"Observation: {observation}"})
                 continue
                 
@@ -107,27 +142,53 @@ class ReActAgent:
                 if "Final Answer:" in llm_output:
                     answer = llm_output.split("Final Answer:")[-1].strip()
                     print(f"✅ Final Answer Reached (fallback): {answer}")
-                    return answer
+                    steps.append({
+                        "step": step + 1,
+                        "thought": thought_text,
+                        "action": f"Final Answer: {answer}",
+                        "observation": ""
+                    })
+                    return AgentResult(answer=answer, steps=steps, success=True, total_steps=len(steps))
                 
                 observation = "Error: Invalid output format. You must output exactly: 'Thought: <reasoning>\\nAction: <tool_name> <arguments_json>' or 'Final Answer: <answer>'."
                 print(f"❌ {observation}")
+                steps.append({
+                    "step": step + 1,
+                    "thought": thought_text,
+                    "action": "None",
+                    "observation": observation
+                })
                 messages.append({"role": "user", "content": f"Observation: {observation}"})
                 continue
             
             # 3. Dispatch the tool call
             tool_name = value
+            action_text = f"{tool_name} {json.dumps(args)}"
             print(f"🔧 Dispatching tool: '{tool_name}' with args: {args}")
             try:
                 observation = await self.client.dispatch(tool_name, args)
             except KeyError:
-                observation = f"Error: Tool '{tool_name}' is not registered. Registered tools: write_file, read_file, run_python, search_web"
+                registered = list(self.client.registry.keys())
+                observation = f"Error: Tool '{tool_name}' is not registered. Available tools: {registered}"
             except Exception as e:
                 observation = f"Error executing tool: {str(e)}"
                 
             print(f"📥 Observation: {observation}")
             
+            steps.append({
+                "step": step + 1,
+                "thought": thought_text,
+                "action": action_text,
+                "observation": observation
+            })
+            
             # Feed tool outcome back as user message
             messages.append({"role": "user", "content": f"Observation: {observation}"})
             
         print("⚠️ Maximum steps reached without completing the task.")
-        return "Failed to complete task within maximum steps limit."
+        return AgentResult(
+            answer="Failed to complete task within maximum steps limit.",
+            steps=steps,
+            success=False,
+            total_steps=len(steps)
+        )

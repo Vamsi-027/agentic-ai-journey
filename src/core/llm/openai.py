@@ -24,9 +24,9 @@ class OpenAIClient(BaseLLMClient):
         max_tries=3,
         jitter=backoff.full_jitter
     )
-    async def generate(
+    async def chat(
         self,
-        prompt: str,
+        messages: list[dict],
         system_prompt: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.0,
@@ -37,17 +37,14 @@ class OpenAIClient(BaseLLMClient):
         if hasattr(target_model, "value"):
             target_model = target_model.value
         
-        messages = []
+        full_messages = []
         if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        if isinstance(prompt, list):
-            messages.extend(prompt)
-        else:
-            messages.append({"role": "user", "content": prompt})
+            full_messages.append({"role": "system", "content": system_prompt})
+        full_messages.extend(messages)
 
         response = await self.client.chat.completions.create(
             model=target_model,
-            messages=messages,
+            messages=full_messages,
             temperature=temperature,
             max_tokens=max_tokens
         )
@@ -65,6 +62,24 @@ class OpenAIClient(BaseLLMClient):
             cost_usd=cost,
             is_final=True,
             stop_reason=response.choices[0].finish_reason
+        )
+
+    async def generate(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1000
+    ) -> LLMResponse:
+        """Asynchronously call OpenAI Chat Completion API, returning a unified response."""
+        messages = [{"role": "user", "content": prompt}]
+        return await self.chat(
+            messages=messages,
+            system_prompt=system_prompt,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens
         )
 
     @backoff.on_exception(

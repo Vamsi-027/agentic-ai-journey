@@ -23,15 +23,15 @@ class ClaudeClient(BaseLLMClient):
         max_tries=3,
         jitter=backoff.full_jitter,
     )
-    async def generate(
+    async def chat(
         self,
-        prompt: str,
+        messages: list[dict],
         system_prompt: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.0,
         max_tokens: int = 1000,
     ) -> LLMResponse:
-        """Asynchronously call Claude API, resolving parameters and returning a unified response."""
+        """Asynchronously call Claude Chat Completion API with conversation history."""
         target_model = model or self.default_model
         if hasattr(target_model, "value"):
             target_model = target_model.value
@@ -40,9 +40,7 @@ class ClaudeClient(BaseLLMClient):
             "model": target_model,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "messages": prompt
-            if isinstance(prompt, list)
-            else [{"role": "user", "content": prompt}],
+            "messages": messages,
         }
         if system_prompt:
             kwargs["system"] = system_prompt
@@ -62,6 +60,24 @@ class ClaudeClient(BaseLLMClient):
             cost_usd=cost,
             is_final=True,
             stop_reason=response.stop_reason,
+        )
+
+    async def generate(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1000,
+    ) -> LLMResponse:
+        """Asynchronously call Claude API, resolving parameters and returning a unified response."""
+        messages = [{"role": "user", "content": prompt}]
+        return await self.chat(
+            messages=messages,
+            system_prompt=system_prompt,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
 
     @backoff.on_exception(
