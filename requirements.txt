@@ -1,10 +1,1 @@
-anthropic
-python-dotenv
-backoff
-pyyaml
-torch
-tiktoken
-kagglehub
-numpy
-pandas
-matplotlib
+-r requirements/base.txt

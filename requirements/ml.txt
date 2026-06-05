@@ -1,0 +1,7 @@
+-r base.txt
+torch
+tiktoken
+kagglehub
+numpy
+pandas
+matplotlib

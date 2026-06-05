@@ -4,10 +4,18 @@ import json
 import time
 import random
 import yaml
+import asyncio
+import hashlib
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from src.core.client import AgenticClient
+from src.core.llm import get_llm_client, LLMProvider, ClaudeModel, OpenAIModel
 from src.core.database import init_db, log_result_to_db
+
+# ==============================================================================
+# CONFIGURATION: Choose provider (LLMProvider.CLAUDE or LLMProvider.OPENAI)
+# ==============================================================================
+PROVIDER = LLMProvider.CLAUDE
+CONCURRENCY = 5
+# ==============================================================================
 
 # Resolve workspace root and load decoupled prompts from prompts/concept_explanations.yaml
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,45 +27,89 @@ with open(PROMPTS_PATH, "r", encoding="utf-8") as f:
 # Load prompt template from config
 PROMPT_TEMPLATE = prompts_config["templates"]["explanation"]
 
-# Define variants using prompts loaded from YAML configuration
-VARIANTS = [
-    {
-        "name": "Sonnet-Factual",
-        "model": "claude-sonnet-4-6",
-        "temperature": 0.0,
-        "system_prompt": prompts_config["system_prompts"]["Sonnet-Factual"],
-        "max_tokens": 4000,
-    },
-    {
-        "name": "Sonnet-Creative",
-        "model": "claude-sonnet-4-6",
-        "temperature": 0.7,
-        "system_prompt": prompts_config["system_prompts"]["Sonnet-Creative"],
-        "max_tokens": 4000,
-        "repeats": 5,  # Run this variant 5 times to test repeatability
-    },
-    {
-        "name": "Haiku-Concise",
-        "model": "claude-haiku-4-5-20251001",
-        "temperature": 0.2,
-        "system_prompt": prompts_config["system_prompts"]["Haiku-Concise"],
-        "max_tokens": 1000,
-    },
-    {
-        "name": "Haiku-Factual",
-        "model": "claude-haiku-4-5-20251001",
-        "temperature": 0.0,
-        "system_prompt": prompts_config["system_prompts"]["Haiku-Factual"],
-        "max_tokens": 1000,
-    },
-    {
-        "name": "Haiku-PlainProse",
-        "model": "claude-haiku-4-5-20251001",
-        "temperature": 0.2,
-        "system_prompt": prompts_config["system_prompts"]["Haiku-PlainProse"],
-        "max_tokens": 200,
-    },
-]
+# Resolve provider name safely (supporting both Enum and raw string fallback)
+provider_name = PROVIDER.value if isinstance(PROVIDER, LLMProvider) else str(PROVIDER)
+provider_clean = provider_name.lower().strip()
+
+# Define variants using prompts loaded from YAML configuration, split by provider
+if provider_clean == LLMProvider.OPENAI.value:
+    VARIANTS = [
+        {
+            "name": "GPT4o-Factual",
+            "model": OpenAIModel.GPT_4O,
+            "temperature": 0.0,
+            "system_prompt": prompts_config["system_prompts"]["Sonnet-Factual"],
+            "max_tokens": 4000,
+        },
+        {
+            "name": "GPT4o-Creative",
+            "model": OpenAIModel.GPT_4O,
+            "temperature": 0.7,
+            "system_prompt": prompts_config["system_prompts"]["Sonnet-Creative"],
+            "max_tokens": 4000,
+            "repeats": 5,  # Run this variant 5 times to test repeatability
+        },
+        {
+            "name": "GPT4oMini-Concise",
+            "model": OpenAIModel.GPT_4O_MINI,
+            "temperature": 0.2,
+            "system_prompt": prompts_config["system_prompts"]["Haiku-Concise"],
+            "max_tokens": 1000,
+        },
+        {
+            "name": "GPT4oMini-Factual",
+            "model": OpenAIModel.GPT_4O_MINI,
+            "temperature": 0.0,
+            "system_prompt": prompts_config["system_prompts"]["Haiku-Factual"],
+            "max_tokens": 1000,
+        },
+        {
+            "name": "GPT4oMini-PlainProse",
+            "model": OpenAIModel.GPT_4O_MINI,
+            "temperature": 0.2,
+            "system_prompt": prompts_config["system_prompts"]["Haiku-PlainProse"],
+            "max_tokens": 200,
+        },
+    ]
+else:  # default to claude
+    VARIANTS = [
+        {
+            "name": "Sonnet-Factual",
+            "model": ClaudeModel.CLAUDE_SONNET_4_6,
+            "temperature": 0.0,
+            "system_prompt": prompts_config["system_prompts"]["Sonnet-Factual"],
+            "max_tokens": 4000,
+        },
+        {
+            "name": "Sonnet-Creative",
+            "model": ClaudeModel.CLAUDE_SONNET_4_6,
+            "temperature": 0.7,
+            "system_prompt": prompts_config["system_prompts"]["Sonnet-Creative"],
+            "max_tokens": 4000,
+            "repeats": 5,  # Run this variant 5 times to test repeatability
+        },
+        {
+            "name": "Haiku-Concise",
+            "model": ClaudeModel.CLAUDE_HAIKU_4_5,
+            "temperature": 0.2,
+            "system_prompt": prompts_config["system_prompts"]["Haiku-Concise"],
+            "max_tokens": 1000,
+        },
+        {
+            "name": "Haiku-Factual",
+            "model": ClaudeModel.CLAUDE_HAIKU_4_5,
+            "temperature": 0.0,
+            "system_prompt": prompts_config["system_prompts"]["Haiku-Factual"],
+            "max_tokens": 1000,
+        },
+        {
+            "name": "Haiku-PlainProse",
+            "model": ClaudeModel.CLAUDE_HAIKU_4_5,
+            "temperature": 0.2,
+            "system_prompt": prompts_config["system_prompts"]["Haiku-PlainProse"],
+            "max_tokens": 200,
+        },
+    ]
 
 # Define test inputs
 TEST_INPUTS = [
@@ -67,18 +119,22 @@ TEST_INPUTS = [
 ]
 
 
-def run_single_experiment(client, variant, test_input, repeat_idx):
-    """Runs a single prompt experiment iteration with rate-limit retries."""
+async def run_single_experiment(client, variant, test_input, repeat_idx):
+    """Runs a single prompt experiment iteration asynchronously using unified LLM layer."""
     start_time = time.time()
     max_tok = variant.get("max_tokens", 1000)
 
     try:
         user_prompt = PROMPT_TEMPLATE.format(**test_input)
+        prompt_hash = hashlib.sha256(user_prompt.encode("utf-8")).hexdigest()
     except KeyError as e:
         return {
             "status": "Error",
             "error": f"Missing template parameter: {e}",
             "latency": 0,
+            "latency_ms": 0,
+            "prompt_hash": "",
+            "cost_usd": 0.0,
             "input_tokens": 0,
             "output_tokens": 0,
             "total_tokens": 0,
@@ -91,48 +147,49 @@ def run_single_experiment(client, variant, test_input, repeat_idx):
         }
 
     try:
-        # Call core AgenticClient wrapper which has built-in backoff logic
-        response = client.messages.create(
+        # Call the unified async generate method
+        response = await client.generate(
+            prompt=user_prompt,
+            system_prompt=variant["system_prompt"],
             model=variant["model"],
-            max_tokens=max_tok,
             temperature=variant["temperature"],
-            system=variant["system_prompt"],
-            messages=[{"role": "user", "content": user_prompt}],
+            max_tokens=max_tok
         )
 
         latency = time.time() - start_time
-        response_text = response.content[0].text
-
-        # Token tracking
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
-        total_tokens = input_tokens + output_tokens
-
-        # Stop reason and truncation flag
-        stop_reason = getattr(response, "stop_reason", "")
-        truncated = 1 if stop_reason == "max_tokens" else 0
+        latency_ms = int(latency * 1000)
+        stop_reason = response.stop_reason or "end_turn"
+        truncated = 1 if stop_reason.lower() in ("max_tokens", "length") else 0
 
         return {
             "status": "Success",
             "error": "",
             "latency": round(latency, 2),
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": total_tokens,
+            "latency_ms": latency_ms,
+            "prompt_hash": prompt_hash,
+            "cost_usd": response.cost_usd,
+            "input_tokens": response.input_tokens,
+            "output_tokens": response.output_tokens,
+            "total_tokens": response.input_tokens + response.output_tokens,
             "stop_reason": stop_reason,
             "truncated": truncated,
-            "response": response_text,
+            "response": response.text,
             "test_input": test_input,
             "repeat_idx": repeat_idx,
             **variant,
+            "model": response.model,
         }
 
     except Exception as e:
         latency = time.time() - start_time
+        latency_ms = int(latency * 1000)
         return {
             "status": "Error",
             "error": str(e),
             "latency": round(latency, 2),
+            "latency_ms": latency_ms,
+            "prompt_hash": prompt_hash if 'prompt_hash' in locals() else "",
+            "cost_usd": 0.0,
             "input_tokens": 0,
             "output_tokens": 0,
             "total_tokens": 0,
@@ -257,9 +314,41 @@ def print_summary_table(results):
     print("=" * 123 + "\n")
 
 
-def main():
-    # Use centralized AgenticClient wrapper
-    client = AgenticClient()
+async def run_and_log(sem, completed_counter, total_runs, conn, run_id, timestamp, client, variant, test_input, repeat_idx, results):
+    """Executes a single experiment run, records logs to SQLite DB, and prints incremental progress."""
+    async with sem:
+        res = await run_single_experiment(client, variant, test_input, repeat_idx)
+    results.append(res)
+
+    # Log result to SQLite with tags
+    tags = f"{provider_clean},variant_{variant['name']}"
+    log_result_to_db(
+        conn, run_id, timestamp, PROMPT_TEMPLATE, test_input, variant, res, tags
+    )
+
+    completed_counter[0] += 1
+
+    # Console progress updates
+    status_symbol = "✅" if res["status"] == "Success" else "❌"
+    trunc_suffix = " ⚠️ [TRUNCATED]" if res.get("truncated", 0) else ""
+    repeat_suffix = f" (run {repeat_idx})" if variant.get("repeats", 1) > 1 else ""
+
+    print(
+        f"[{completed_counter[0]}/{total_runs}] {status_symbol} "
+        f"Variant: {res['name']}{repeat_suffix} | "
+        f"Input: {list(test_input.values())} | "
+        f"Latency: {res['latency']}s | "
+        f"Tokens: In={res.get('input_tokens', 0)}, Out={res.get('output_tokens', 0)}"
+        f"{trunc_suffix}"
+    )
+
+    if res["status"] == "Error":
+        print(f"   ⚠️ Error: {res['error']}")
+
+
+async def main():
+    # Use centralized factory client wrapper based on selected PROVIDER
+    client = get_llm_client(provider=PROVIDER)
 
     # Initialize SQLite Database at the centralized location (data/prompt_experiments.db)
     conn = init_db()
@@ -277,7 +366,7 @@ def main():
 
     print("\n" + "=" * 80)
     print("🚀 STARTING PROMPT EXPERIMENTATION HARNESS")
-    print(f"Run ID: {run_id}")
+    print(f"Provider: {PROVIDER.upper()} | Run ID: {run_id}")
     print("=" * 80)
     print(f"Prompt Template: {PROMPT_TEMPLATE.strip()}")
     print(f"Loaded {len(VARIANTS)} variants and {len(TEST_INPUTS)} test inputs.")
@@ -287,53 +376,17 @@ def main():
     results = []
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Use 8 workers to reduce rate-limit pressure
-    max_workers = min(8, len(all_runs))
-    print(f"Executing runs in parallel with {max_workers} worker threads...\n")
+    # Use CONCURRENCY to reduce rate-limit pressure
+    max_workers = min(CONCURRENCY, len(all_runs))
+    print(f"Executing runs concurrently via async gather (limit={max_workers} concurrent tasks)...\n")
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                run_single_experiment, client, variant, test_input, repeat_idx
-            ): (variant, test_input, repeat_idx)
-            for variant, test_input, repeat_idx in all_runs
-        }
-
-        completed_count = 0
-        for future in as_completed(futures):
-            completed_count += 1
-            variant, test_input, repeat_idx = futures[future]
-            try:
-                res = future.result()
-                results.append(res)
-
-                # Log result to centralized SQLite DB
-                log_result_to_db(
-                    conn, run_id, timestamp, PROMPT_TEMPLATE, test_input, variant, res
-                )
-
-                # Console progress updates
-                status_symbol = "✅" if res["status"] == "Success" else "❌"
-                trunc_suffix = " ⚠️ [TRUNCATED]" if res.get("truncated", 0) else ""
-                repeat_suffix = (
-                    f" (run {repeat_idx})" if variant.get("repeats", 1) > 1 else ""
-                )
-
-                print(
-                    f"[{completed_count}/{len(all_runs)}] {status_symbol} "
-                    f"Variant: {res['name']}{repeat_suffix} | "
-                    f"Input: {list(test_input.values())} | "
-                    f"Latency: {res['latency']}s | "
-                    f"Tokens: In={res.get('input_tokens', 0)}, Out={res.get('output_tokens', 0)}"
-                    f"{trunc_suffix}"
-                )
-
-                if res["status"] == "Error":
-                    print(f"   ⚠️ Error: {res['error']}")
-            except Exception as exc:
-                print(
-                    f"[{completed_count}/{len(all_runs)}] 💥 Generated an exception: {exc}"
-                )
+    sem = asyncio.Semaphore(max_workers)
+    completed_counter = [0]
+    tasks = [
+        run_and_log(sem, completed_counter, len(all_runs), conn, run_id, timestamp, client, variant, test_input, repeat_idx, results)
+        for variant, test_input, repeat_idx in all_runs
+    ]
+    await asyncio.gather(*tasks)
 
     # Close SQLite connection
     conn.close()
@@ -347,4 +400,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # asyncio.run() is the correct entry point for sync callers.
+    # Never call async methods directly from sync code — use this pattern only
+    # at the outermost boundary (CLI scripts, __main__ blocks).
+    asyncio.run(main())

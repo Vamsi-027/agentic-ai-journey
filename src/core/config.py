@@ -15,4 +15,14 @@ class Settings:
             )
         return key
 
+    @property
+    def OPENAI_API_KEY(self) -> str:
+        key = os.getenv("OPENAI_API_KEY")
+        if not key:
+            raise ValueError(
+                "OPENAI_API_KEY environment variable is not set. "
+                "Please check your root .env file."
+            )
+        return key
+
 settings = Settings()
