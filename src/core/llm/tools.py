@@ -12,7 +12,7 @@ from src.core.config import settings
 # Helper functions for validation & encoding
 # ==============================================================================
 
-def validate_path(path: str, workspace_root: str) -> Path | str:
+def validate_path(path: str, workspace_root: Path | str) -> Path | str:
     """Resolves target path and checks it remains strictly within the workspace root."""
     try:
         workspace_path = Path(workspace_root).resolve()
@@ -33,6 +33,15 @@ def validate_path(path: str, workspace_root: str) -> Path | str:
         return f"Error: invalid path format: {str(e)}"
 
 
+_SKIP_PREFIXES = (".", "__")
+
+def _should_skip(p: Path, base: Path) -> bool:
+    try:
+        return any(part.startswith(_SKIP_PREFIXES) for part in p.relative_to(base).parts)
+    except ValueError:
+        return True
+
+
 def read_file_content_internal(path: Path) -> str:
     """Reads file content with robust encoding detection, attempting UTF-8 first."""
     try:
@@ -42,32 +51,42 @@ def read_file_content_internal(path: Path) -> str:
         if not raw_data:
             return ""
             
+        content = None
         # 1. Try UTF-8 first
         try:
-            return raw_data.decode("utf-8")
+            content = raw_data.decode("utf-8")
         except UnicodeDecodeError:
             pass
             
         # 2. Try UTF-16 if BOM is present
-        if raw_data.startswith((b'\xff\xfe', b'\xfe\xff')):
-            try:
-                return raw_data.decode("utf-16")
-            except Exception:
-                pass
+        if content is None:
+            if raw_data.startswith((b'\xff\xfe', b'\xfe\xff')):
+                try:
+                    content = raw_data.decode("utf-16")
+                except Exception:
+                    pass
                 
         # 3. Try charset_normalizer with high confidence threshold
-        detected = charset_normalizer.detect(raw_data)
-        encoding = detected.get("encoding")
-        confidence = detected.get("confidence", 0.0)
-        
-        if encoding and confidence > 0.85 and not (encoding.startswith("utf_16") and len(raw_data) < 10):
-            try:
-                return raw_data.decode(encoding)
-            except Exception:
-                pass
+        if content is None:
+            detected = charset_normalizer.detect(raw_data)
+            encoding = detected.get("encoding")
+            confidence = detected.get("confidence", 0.0)
+            
+            if encoding and confidence > 0.85 and not (encoding.startswith("utf_16") and len(raw_data) < 10):
+                try:
+                    content = raw_data.decode(encoding)
+                except Exception:
+                    pass
                 
         # 4. Fallback to ISO-8859-1 (Latin-1)
-        return raw_data.decode("latin-1")
+        if content is None:
+            content = raw_data.decode("latin-1")
+
+        MAX_CHARS = 50_000
+        if len(content) > MAX_CHARS:
+            content = content[:MAX_CHARS] + f"\n\n... [truncated — {len(content):,} total chars, showing first {MAX_CHARS:,}]"
+            
+        return content
     except Exception as e:
         return f"Error: Failed to read or decode file: {str(e)}"
 
@@ -221,8 +240,8 @@ def write_file(path: str, content: str) -> str:
         
         # Atomic write via temp file in target directory
         with tempfile.NamedTemporaryFile(dir=val.parent, delete=False, mode="w", encoding="utf-8") as temp_file:
-            temp_file.write(content)
             temp_path = Path(temp_file.name)
+            temp_file.write(content)
             
         os.replace(temp_path, val)
         return f"File written successfully to {path}"
@@ -290,6 +309,8 @@ def list_directory(path: str, pattern: Optional[str] = None) -> str:
         files_found = []
         for p in val.rglob(glob_pattern):
             if p.is_file():
+                if _should_skip(p, val):
+                    continue
                 # Validate path safety in case of symlinks
                 file_val = validate_path(str(p), settings.WORKSPACE_ROOT)
                 if isinstance(file_val, str):
@@ -335,7 +356,10 @@ def search_in_files(query: str, path: str, file_pattern: Optional[str] = None) -
             files_to_search = [p for p in val.rglob(glob_pattern) if p.is_file()]
             
         results = []
+        base_dir = val if val.is_dir() else val.parent
         for file_path in files_to_search:
+            if _should_skip(file_path, base_dir):
+                continue
             file_val = validate_path(str(file_path), settings.WORKSPACE_ROOT)
             if isinstance(file_val, str):
                 continue

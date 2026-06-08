@@ -188,3 +188,45 @@ def test_edit_file_multiple_occurrences(mock_workspace_root):
 def test_edit_file_escape(mock_workspace_root):
     res = edit_file("../escaped_edit.txt", "old", "new")
     assert res == "Error: path escape — access denied"
+
+
+# ==============================================================================
+# 7. Bug Fixes Tests (Truncation, Hidden File Filtering)
+# ==============================================================================
+
+def test_read_file_truncation(mock_workspace_root):
+    test_file = mock_workspace_root / "large.txt"
+    # Create content larger than 50,000 characters
+    large_content = "x" * 60_000
+    test_file.write_text(large_content, encoding="utf-8")
+
+    res = read_file(str(test_file))
+    assert len(res) < 60_000
+    assert "... [truncated — 60,000 total chars, showing first 50,000]" in res
+    assert res.startswith("x" * 50_000)
+
+
+def test_skip_hidden_files(mock_workspace_root):
+    # Setup standard and hidden/cache files
+    (mock_workspace_root / "main.py").write_text("print('main')", encoding="utf-8")
+    
+    git_dir = mock_workspace_root / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("[core]", encoding="utf-8")
+    
+    pycache_dir = mock_workspace_root / "__pycache__"
+    pycache_dir.mkdir()
+    (pycache_dir / "module.pyc").write_text("binary", encoding="utf-8")
+
+    # Verify list_directory ignores .git and __pycache__
+    list_res = list_directory(".")
+    assert "main.py" in list_res
+    assert "config" not in list_res
+    assert "module.pyc" not in list_res
+
+    # Verify search_in_files ignores .git and __pycache__
+    # Search for "core" which matches in .git/config
+    search_res = search_in_files(query="core", path=".")
+    assert "No matches found" in search_res or "main.py" in search_res
+    assert "config" not in search_res
+
