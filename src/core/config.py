@@ -25,4 +25,8 @@ class Settings:
             )
         return key
 
+    @property
+    def WORKSPACE_ROOT(self) -> str:
+        return os.getenv("WORKSPACE_ROOT", os.path.abspath(os.getcwd()))
+
 settings = Settings()

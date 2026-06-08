@@ -16,10 +16,16 @@ from src.core.llm.tools import (
     READ_FILE_TOOL,
     RUN_PYTHON_TOOL,
     SEARCH_WEB_TOOL,
+    LIST_DIRECTORY_TOOL,
+    SEARCH_IN_FILES_TOOL,
+    EDIT_FILE_TOOL,
     write_file,
     read_file,
     run_python,
-    search_web
+    search_web,
+    list_directory,
+    search_in_files,
+    edit_file
 )
 
 __all__ = [
@@ -38,10 +44,16 @@ __all__ = [
     "READ_FILE_TOOL",
     "RUN_PYTHON_TOOL",
     "SEARCH_WEB_TOOL",
+    "LIST_DIRECTORY_TOOL",
+    "SEARCH_IN_FILES_TOOL",
+    "EDIT_FILE_TOOL",
     "write_file",
     "read_file",
     "run_python",
-    "search_web"
+    "search_web",
+    "list_directory",
+    "search_in_files",
+    "edit_file"
 ]
 
 def get_llm_client(
