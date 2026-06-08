@@ -42,6 +42,63 @@ class AgentResult:
     total_steps: int
 
 
+def _extract_json(text: str) -> Optional[str]:
+    """Extract the first balanced JSON object from text."""
+    start = text.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    in_string_char = None
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            if ch == '\\':
+                i += 2  # skip escaped character
+                continue
+            elif ch == in_string_char:
+                in_string = False
+                in_string_char = None
+        else:
+            if ch in ('"', "'"):
+                in_string = True
+                in_string_char = ch
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+        i += 1
+    return None
+
+
+def _log_agent_step(
+    tracer,
+    response,
+    step_start_time: float,
+    thought: str,
+    action: str,
+    action_input: str,
+    observation: str,
+) -> Tuple[int, float]:
+    import time
+    latency_ms = int((time.time() - step_start_time) * 1000)
+    tokens = (response.input_tokens + response.output_tokens) if response else 0
+    cost = getattr(response, "cost_usd", 0.0) or 0.0
+
+    tracer.log_step(
+        thought=thought,
+        action=action,
+        action_input=action_input,
+        observation=observation,
+        latency_ms=latency_ms,
+        tokens_used=tokens,
+    )
+    return tokens, cost
+
+
 def parse_react_action(text: str) -> Tuple[str, str, dict]:
     """Parses LLM output text for Action or Final Answer blocks.
 
@@ -53,19 +110,26 @@ def parse_react_action(text: str) -> Tuple[str, str, dict]:
         - "error": tool_name_or_answer contains error description, arguments has raw arguments string
         - "none": no parseable block was found
     """
-    # Look for Action: tool_name {"args": ...}
-    action_match = re.search(r"Action:\s*(\w+)\s*(\{.*?\})", text, re.DOTALL)
+    # Look for Action: tool_name
+    action_match = re.search(r"Action:\s*(\w+)\s*", text)
     if action_match:
         tool_name = action_match.group(1).strip()
-        args_str = action_match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-            return "action", tool_name, args
-        except json.JSONDecodeError:
+        args_str = _extract_json(text[action_match.end():])
+        if args_str:
+            try:
+                args = json.loads(args_str)
+                return "action", tool_name, args
+            except json.JSONDecodeError:
+                return (
+                    "error",
+                    "Failed to parse Action arguments as valid JSON",
+                    {"raw_args": args_str},
+                )
+        else:
             return (
                 "error",
-                "Failed to parse Action arguments as valid JSON",
-                {"raw_args": args_str},
+                "Action arguments JSON block not found or unbalanced",
+                {"raw_args": text[action_match.end():].strip()},
             )
 
     # Look for Final Answer: ...
@@ -92,10 +156,16 @@ class ReActAgent:
         self.max_steps = max_steps
 
     def _build_system_prompt(self) -> str:
-        tools_section = "\n".join(
-            f"- {name}: {tool_def.description} Arguments: {json.dumps({k: v.get('type', 'string') for k, v in tool_def.input_schema.get('properties', {}).items()})}"
-            for name, (tool_def, _) in self.client.registry.items()
-        )
+        parts = []
+        for name, (tool_def, _) in self.client.registry.items():
+            props = tool_def.input_schema.get("properties", {})
+            required = set(tool_def.input_schema.get("required", []))
+            args_desc = ", ".join(
+                f"{k} ({'required' if k in required else 'optional'}): {v.get('description', v.get('type', ''))}"
+                for k, v in props.items()
+            )
+            parts.append(f"- {name}: {tool_def.description}\n  Args: {args_desc}")
+        tools_section = "\n".join(parts)
         if "{{TOOLS}}" in self.system_prompt:
             return self.system_prompt.replace("{{TOOLS}}", tools_section)
         return self.system_prompt
@@ -108,6 +178,7 @@ class ReActAgent:
         messages = [{"role": "user", "content": f"Task: {task}"}]
         steps = []
         sys_prompt = self._build_system_prompt()
+        seen_actions: set[str] = set()
 
         total_cost_usd = 0.0
         total_tokens = 0
@@ -122,12 +193,13 @@ class ReActAgent:
                 step_start_time = time.time()
                 print(f"\n🚀 === [AGENT STEP {step + 1}] ===")
 
-                # 1. Generate next step
+                # 1. Generate next step passing stop sequence to prevent hallucinating observation
                 response = await self.client.chat(
                     messages=messages,
                     system_prompt=sys_prompt,
                     model=self.model,
                     temperature=0.0,
+                    stop=["Observation:"]
                 )
                 llm_output = response.text
                 print(f"\n[Agent Thought & Action]:\n{llm_output}\n")
@@ -161,27 +233,19 @@ class ReActAgent:
                         }
                     )
 
-                    step_latency_ms = int((time.time() - step_start_time) * 1000)
-                    step_tokens = (
-                        (response.input_tokens + response.output_tokens)
-                        if response
-                        else 0
+                    step_tokens, step_cost = _log_agent_step(
+                        tracer, response, step_start_time,
+                        thought=thought_text,
+                        action="Final Answer",
+                        action_input=json.dumps({"answer": value}),
+                        observation=""
                     )
                     total_tokens += step_tokens
-                    total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
-
+                    total_cost_usd += step_cost
                     tracer.total_cost_usd = total_cost_usd
                     tracer.total_tokens = total_tokens
                     tracer.outcome = "success"
 
-                    tracer.log_step(
-                        thought=thought_text,
-                        action="Final Answer",
-                        action_input=json.dumps({"answer": value}),
-                        observation="",
-                        latency_ms=step_latency_ms,
-                        tokens_used=step_tokens,
-                    )
                     return AgentResult(
                         answer=value, steps=steps, success=True, total_steps=len(steps)
                     )
@@ -201,26 +265,17 @@ class ReActAgent:
                         {"role": "user", "content": f"Observation: {observation}"}
                     )
 
-                    step_latency_ms = int((time.time() - step_start_time) * 1000)
-                    step_tokens = (
-                        (response.input_tokens + response.output_tokens)
-                        if response
-                        else 0
-                    )
-                    total_tokens += step_tokens
-                    total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
-
-                    tracer.total_cost_usd = total_cost_usd
-                    tracer.total_tokens = total_tokens
-
-                    tracer.log_step(
+                    step_tokens, step_cost = _log_agent_step(
+                        tracer, response, step_start_time,
                         thought=thought_text,
                         action=f"Error Action: {value}",
                         action_input=json.dumps(args),
-                        observation=observation,
-                        latency_ms=step_latency_ms,
-                        tokens_used=step_tokens,
+                        observation=observation
                     )
+                    total_tokens += step_tokens
+                    total_cost_usd += step_cost
+                    tracer.total_cost_usd = total_cost_usd
+                    tracer.total_tokens = total_tokens
                     continue
 
                 elif status == "none":
@@ -237,27 +292,19 @@ class ReActAgent:
                             }
                         )
 
-                        step_latency_ms = int((time.time() - step_start_time) * 1000)
-                        step_tokens = (
-                            (response.input_tokens + response.output_tokens)
-                            if response
-                            else 0
+                        step_tokens, step_cost = _log_agent_step(
+                            tracer, response, step_start_time,
+                            thought=thought_text,
+                            action="Final Answer",
+                            action_input=json.dumps({"answer": answer}),
+                            observation=""
                         )
                         total_tokens += step_tokens
-                        total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
-
+                        total_cost_usd += step_cost
                         tracer.total_cost_usd = total_cost_usd
                         tracer.total_tokens = total_tokens
                         tracer.outcome = "success"
 
-                        tracer.log_step(
-                            thought=thought_text,
-                            action="Final Answer",
-                            action_input=json.dumps({"answer": answer}),
-                            observation="",
-                            latency_ms=step_latency_ms,
-                            tokens_used=step_tokens,
-                        )
                         return AgentResult(
                             answer=answer,
                             steps=steps,
@@ -279,39 +326,41 @@ class ReActAgent:
                         {"role": "user", "content": f"Observation: {observation}"}
                     )
 
-                    step_latency_ms = int((time.time() - step_start_time) * 1000)
-                    step_tokens = (
-                        (response.input_tokens + response.output_tokens)
-                        if response
-                        else 0
-                    )
-                    total_tokens += step_tokens
-                    total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
-
-                    tracer.total_cost_usd = total_cost_usd
-                    tracer.total_tokens = total_tokens
-
-                    tracer.log_step(
+                    step_tokens, step_cost = _log_agent_step(
+                        tracer, response, step_start_time,
                         thought=thought_text,
                         action="None",
                         action_input=json.dumps({}),
-                        observation=observation,
-                        latency_ms=step_latency_ms,
-                        tokens_used=step_tokens,
+                        observation=observation
                     )
+                    total_tokens += step_tokens
+                    total_cost_usd += step_cost
+                    tracer.total_cost_usd = total_cost_usd
+                    tracer.total_tokens = total_tokens
                     continue
 
                 # 3. Dispatch the tool call
                 tool_name = value
                 action_text = f"{tool_name} {json.dumps(args)}"
                 print(f"🔧 Dispatching tool: '{tool_name}' with args: {args}")
-                try:
-                    observation = await self.client.dispatch(tool_name, args)
-                except KeyError:
-                    registered = list(self.client.registry.keys())
-                    observation = f"Error: Tool '{tool_name}' is not registered. Available tools: {registered}"
-                except Exception as e:
-                    observation = f"Error executing tool: {str(e)}"
+
+                # Loop detection: check if this action with these args has been run before
+                action_key = f"{tool_name}:{json.dumps(args, sort_keys=True)}"
+                if action_key in seen_actions:
+                    observation = (
+                        f"Error: You already called '{tool_name}' with these exact arguments. "
+                        "You already know this result. Review your observations and try a different approach."
+                    )
+                    print(f"🔁 Loop detected: {observation}")
+                else:
+                    seen_actions.add(action_key)
+                    try:
+                        observation = await self.client.dispatch(tool_name, args)
+                    except KeyError:
+                        registered = list(self.client.registry.keys())
+                        observation = f"Error: Tool '{tool_name}' is not registered. Available tools: {registered}"
+                    except Exception as e:
+                        observation = f"Error executing tool: {str(e)}"
 
                 print(f"📥 Observation: {observation}")
 
@@ -329,24 +378,17 @@ class ReActAgent:
                     {"role": "user", "content": f"Observation: {observation}"}
                 )
 
-                step_latency_ms = int((time.time() - step_start_time) * 1000)
-                step_tokens = (
-                    (response.input_tokens + response.output_tokens) if response else 0
-                )
-                total_tokens += step_tokens
-                total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
-
-                tracer.total_cost_usd = total_cost_usd
-                tracer.total_tokens = total_tokens
-
-                tracer.log_step(
+                step_tokens, step_cost = _log_agent_step(
+                    tracer, response, step_start_time,
                     thought=thought_text,
                     action=tool_name,
                     action_input=json.dumps(args),
-                    observation=observation,
-                    latency_ms=step_latency_ms,
-                    tokens_used=step_tokens,
+                    observation=observation
                 )
+                total_tokens += step_tokens
+                total_cost_usd += step_cost
+                tracer.total_cost_usd = total_cost_usd
+                tracer.total_tokens = total_tokens
 
             print("⚠️ Maximum steps reached without completing the task.")
             tracer.outcome = "failure"
@@ -461,25 +503,30 @@ async def evaluate_success(
             messages=[{"role": "user", "content": prompt}], temperature=0.0, model=model
         )
         text = response.text.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-
-        data = json.loads(text)
-        return bool(data.get("success", False)), str(
-            data.get("reason", "No reason provided.")
-        )
+        json_str = _extract_json(text)
+        if json_str:
+            data = json.loads(json_str)
+            return bool(data.get("success", False)), str(
+                data.get("reason", "No reason provided.")
+            )
+        else:
+            return False, f"LLM judge response did not contain a valid JSON block: {text}"
     except Exception as e:
-        # Fallback to True if LLM judge fails to avoid blocking the agent run
-        return True, f"LLM judge failed; assumed success. Error: {str(e)}"
+        # Fallback to False if LLM judge fails to be safe and trigger retry
+        return False, f"LLM judge failed; assumed failure to be safe. Error: {str(e)}"
 
 
 async def generate_reflection(
     client: BaseLLMClient, task: str, steps: list[dict], model: Optional[str] = None
 ) -> str:
     """Calls the LLM to reflect on a failed step-by-step trace and generate a self-critique."""
+    if not steps:
+        return (
+            "The agent failed before completing any steps. "
+            "On the next attempt, start with list_directory to orient yourself, "
+            "then read relevant source files before attempting any edits."
+        )
+
     trace_lines = []
     for s in steps:
         trace_lines.append(

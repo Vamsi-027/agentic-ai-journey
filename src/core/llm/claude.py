@@ -30,6 +30,7 @@ class ClaudeClient(BaseLLMClient):
         model: Optional[str] = None,
         temperature: float = 0.0,
         max_tokens: int = 1000,
+        stop: Optional[list[str]] = None,
     ) -> LLMResponse:
         """Asynchronously call Claude Chat Completion API with conversation history."""
         target_model = model or self.default_model
@@ -44,6 +45,8 @@ class ClaudeClient(BaseLLMClient):
         }
         if system_prompt:
             kwargs["system"] = system_prompt
+        if stop:
+            kwargs["stop_sequences"] = stop
 
         response = await self.client.messages.create(**kwargs)
 

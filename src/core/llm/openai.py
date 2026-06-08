@@ -30,7 +30,8 @@ class OpenAIClient(BaseLLMClient):
         system_prompt: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.0,
-        max_tokens: int = 1000
+        max_tokens: int = 1000,
+        stop: Optional[list[str]] = None,
     ) -> LLMResponse:
         """Asynchronously call OpenAI Chat Completion API, returning a unified response."""
         target_model = model or self.default_model
@@ -42,12 +43,16 @@ class OpenAIClient(BaseLLMClient):
             full_messages.append({"role": "system", "content": system_prompt})
         full_messages.extend(messages)
 
-        response = await self.client.chat.completions.create(
-            model=target_model,
-            messages=full_messages,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
+        kwargs = {
+            "model": target_model,
+            "messages": full_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        if stop:
+            kwargs["stop"] = stop
+
+        response = await self.client.chat.completions.create(**kwargs)
         
         text = response.choices[0].message.content or ""
         input_tokens = response.usage.prompt_tokens

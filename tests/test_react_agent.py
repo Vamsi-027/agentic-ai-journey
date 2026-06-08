@@ -65,8 +65,8 @@ def test_dynamic_system_prompt_builder():
     
     assert "tool_a: Description A" in prompt
     assert "tool_b: Description B" in prompt
-    assert '"arg1": "string"' in prompt
-    assert '"arg2": "integer"' in prompt
+    assert "arg1 (optional): string" in prompt
+    assert "arg2 (optional): integer" in prompt
 
 
 # ==============================================================================
@@ -331,3 +331,105 @@ async def test_react_agent_reflexion_cap():
         assert result.success is False
         assert result.answer == "Wrong answer"
         assert mock_client.chat.call_count == 8
+
+
+# ==============================================================================
+# 6. Test New Enhancements: robust JSON parsing, loop detection, safety evaluation
+# ==============================================================================
+
+def test_parse_react_action_nested_dict():
+    # Verify that action parsing successfully extracts nested JSON objects/dict literals
+    text = (
+        "Thought: Let's edit the file.\n"
+        "Action: edit_file "
+        r"""{
+  "path": "src/core/agent/react.py",
+  "old_str": "def test():\n  return {'a': 1}",
+  "new_str": "def test():\n  return {'a': 2}"
+}"""
+    )
+    status, tool, args = parse_react_action(text)
+    assert status == "action"
+    assert tool == "edit_file"
+    assert args == {
+        "path": "src/core/agent/react.py",
+        "old_str": "def test():\n  return {'a': 1}",
+        "new_str": "def test():\n  return {'a': 2}"
+    }
+
+
+@pytest.mark.asyncio
+async def test_react_agent_loop_detection():
+    mock_client = MagicMock(spec=BaseLLMClient)
+    mock_client.registry = {}
+    
+    # Register tool
+    tool_def = ToolDefinition(name="read_file", description="reads file", input_schema={"properties": {"path": {"type": "string"}}})
+    mock_client.registry["read_file"] = (tool_def, lambda path: "content")
+    
+    # Mock tool execution return
+    mock_client.dispatch = AsyncMock(return_value="file content")
+    
+    # LLM responses: Action read_file (step 1), Action read_file again (step 2), Final Answer
+    resp1 = LLMResponse(text='Thought: Read file.\nAction: read_file {"path": "test.txt"}', model="test", input_tokens=0, output_tokens=0, cost_usd=0.0)
+    resp2 = LLMResponse(text='Thought: Read file again.\nAction: read_file {"path": "test.txt"}', model="test", input_tokens=0, output_tokens=0, cost_usd=0.0)
+    resp3 = LLMResponse(text="Thought: I have the answer.\nFinal Answer: Done", model="test", input_tokens=0, output_tokens=0, cost_usd=0.0)
+    mock_client.chat = AsyncMock(side_effect=[resp1, resp2, resp3])
+    
+    agent = ReActAgent(client=mock_client, model="test-model", max_steps=5)
+    with patch("src.core.database.DEFAULT_DB_PATH", ":memory:"):
+        result = await agent.run("Check file contents")
+        
+        assert result.success is True
+        assert len(result.steps) == 3
+        # Verify the second step observation contains the loop detection error
+        assert "Error: You already called 'read_file' with these exact arguments" in result.steps[1]["observation"]
+        # Verify the first step actually executed
+        assert result.steps[0]["observation"] == "file content"
+
+
+@pytest.mark.asyncio
+async def test_generate_reflection_empty_steps():
+    from src.core.agent.react import generate_reflection
+    mock_client = MagicMock(spec=BaseLLMClient)
+    critique = await generate_reflection(mock_client, "Calculate math", steps=[])
+    assert "failed before completing any steps" in critique
+    assert "list_directory" in critique
+
+
+@pytest.mark.asyncio
+async def test_evaluate_success_llm_judge_fallback():
+    from src.core.agent.react import evaluate_success
+    mock_client = MagicMock(spec=BaseLLMClient)
+    # Mock LLM judge throwing an exception (e.g. timeout)
+    mock_client.chat = AsyncMock(side_effect=Exception("Timeout"))
+    
+    success, reason = await evaluate_success(mock_client, "Math task", "4", model="test")
+    assert success is False
+    assert "assumed failure to be safe" in reason
+
+
+@pytest.mark.asyncio
+async def test_evaluate_success_with_surrounding_prose():
+    from src.core.agent.react import evaluate_success
+    mock_client = MagicMock(spec=BaseLLMClient)
+    
+    # LLM judge outputs text before/after JSON
+    judge_response = LLMResponse(
+        text=(
+            "Here is my evaluation:\n"
+            "```json\n"
+            '{"success": true, "reason": "Math is fully correct."}\n'
+            "```\n"
+            "Hope this helps!"
+        ),
+        model="test",
+        input_tokens=0,
+        output_tokens=0,
+        cost_usd=0.0
+    )
+    mock_client.chat = AsyncMock(return_value=judge_response)
+    
+    success, reason = await evaluate_success(mock_client, "Math task", "4", model="test")
+    assert success is True
+    assert reason == "Math is fully correct."

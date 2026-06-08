@@ -225,7 +225,8 @@ class BaseLLMClient(ABC):
         system_prompt: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.0,
-        max_tokens: int = 1000
+        max_tokens: int = 1000,
+        stop: Optional[list[str]] = None,
     ) -> LLMResponse:
         """Asynchronously sends a full conversation history (list[dict]) to the LLM."""
         pass
