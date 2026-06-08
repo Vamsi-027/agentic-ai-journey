@@ -9,7 +9,10 @@ from src.core.llm.tools import (
     write_file,
     list_directory,
     search_in_files,
-    edit_file
+    edit_file,
+    run_python,
+    run_tests,
+    search_web
 )
 
 @pytest.fixture(autouse=True)
@@ -229,4 +232,138 @@ def test_skip_hidden_files(mock_workspace_root):
     search_res = search_in_files(query="core", path=".")
     assert "No matches found" in search_res or "main.py" in search_res
     assert "config" not in search_res
+
+
+# ==============================================================================
+# 8. Web Search & Code/Test Execution Tool Tests
+# ==============================================================================
+
+@patch("httpx.post")
+def test_search_web_tavily(mock_post):
+    # Setup Tavily environment key
+    with patch.dict(os.environ, {"TAVILY_API_KEY": "test_tavily_key"}):
+        # Mock Tavily response
+        mock_response = mock_post.return_value
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "results": [
+                {"title": "Result 1", "url": "https://url1.com", "content": "Short snippet"},
+                {"title": "Result 2", "url": "https://url2.com", "content": "Long snippet " * 100},
+                {"title": "Result 3", "url": "https://url3.com", "content": "Snippet 3"},
+                {"title": "Result 4", "url": "https://url4.com", "content": "Snippet 4"},
+                {"title": "Result 5", "url": "https://url5.com", "content": "Snippet 5"},
+                {"title": "Result 6", "url": "https://url6.com", "content": "Snippet 6"}
+            ]
+        }
+        
+        res = search_web("test query")
+        
+        # Check Tavily post call is made
+        mock_post.assert_called_once()
+        
+        # Check max 5 results
+        assert "1. Result 1" in res
+        assert "5. Result 5" in res
+        assert "6. Result 6" not in res
+        
+        # Check snippet truncation (Result 2 content is long)
+        assert len("Long snippet " * 100) > 300
+        assert "..." in res
+
+
+@patch("httpx.post")
+@patch("duckduckgo_search.DDGS")
+def test_search_web_ddg_fallback(mock_ddgs_cls, mock_post):
+    # Tavily API throws exception
+    mock_post.side_effect = Exception("Tavily API error")
+    
+    # Mock DuckDuckGo results
+    mock_ddgs = mock_ddgs_cls.return_value.__enter__.return_value
+    mock_ddgs.text.return_value = [
+        {"title": "DDG 1", "href": "https://ddg1.com", "body": "DDG snippet"},
+        {"title": "DDG 2", "href": "https://ddg2.com", "body": "Long DDG " * 100}
+    ]
+    
+    with patch.dict(os.environ, {"TAVILY_API_KEY": "test_tavily_key"}):
+        res = search_web("test query")
+        
+        assert "DDG 1" in res
+        assert "DDG 2" in res
+        assert "..." in res
+
+
+def test_run_python_success(mock_workspace_root):
+    # Create a local file to check import path resolution relative to workspace root
+    (mock_workspace_root / "my_module.py").write_text("MY_CONST = 'imported_val'", encoding="utf-8")
+    
+    code = (
+        "import os\n"
+        "from my_module import MY_CONST\n"
+        "print('CWD:', os.path.basename(os.getcwd()))\n"
+        "print('Imported:', MY_CONST)"
+    )
+    
+    res = run_python(code)
+    assert "Return Code: 0" in res
+    assert "Imported: imported_val" in res
+
+
+def test_run_python_timeout(mock_workspace_root):
+    code = (
+        "import time\n"
+        "time.sleep(2)"
+    )
+    res = run_python(code, timeout=0.5)
+    assert "timed out after 0.5 seconds" in res
+
+
+def test_run_python_truncation(mock_workspace_root):
+    code = "print('x' * 4000)"
+    res = run_python(code)
+    assert "[truncated — showing last 3,000 chars]" in res
+    assert res.endswith("x\n\n")
+    assert len(res) < 3200
+
+
+def test_run_tests(mock_workspace_root):
+    # Write a dummy test file
+    test_file = mock_workspace_root / "test_dummy.py"
+    test_file.write_text(
+        "def test_passing():\n"
+        "    assert True\n\n"
+        "def test_failing():\n"
+        "    assert False\n",
+        encoding="utf-8"
+    )
+    
+    res = run_tests("test_dummy.py")
+    assert "Return Code: 1" in res
+    assert "test_failing" in res
+    assert "test_dummy.py::test_failing" in res
+
+
+def test_run_tests_timeout(mock_workspace_root):
+    test_file = mock_workspace_root / "test_timeout.py"
+    test_file.write_text(
+        "import time\n"
+        "def test_sleep():\n"
+        "    time.sleep(5)\n",
+        encoding="utf-8"
+    )
+    res = run_tests("test_timeout.py", timeout=0.5)
+    assert "timed out after 0.5 seconds" in res
+
+
+def test_run_tests_truncation(mock_workspace_root):
+    test_file = mock_workspace_root / "test_trunc.py"
+    test_file.write_text(
+        "def test_large_output():\n"
+        "    print('y' * 5000)\n"
+        "    assert False\n",
+        encoding="utf-8"
+    )
+    res = run_tests("test_trunc.py")
+    assert "[truncated — showing last 3,000 chars]" in res
+    assert len(res) < 3200
+
 

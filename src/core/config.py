@@ -29,4 +29,8 @@ class Settings:
     def WORKSPACE_ROOT(self) -> str:
         return os.getenv("WORKSPACE_ROOT", os.path.abspath(os.getcwd()))
 
+    @property
+    def TAVILY_API_KEY(self) -> str | None:
+        return os.getenv("TAVILY_API_KEY")
+
 settings = Settings()

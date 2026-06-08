@@ -15,7 +15,8 @@ dependencies = [
     "backoff",
     "pyyaml",
     "pydantic",
-    "httpx"
+    "httpx",
+    "duckduckgo_search"
 ]
 
 [project.optional-dependencies]

@@ -131,7 +131,7 @@ READ_FILE_TOOL = ToolDefinition(
 
 RUN_PYTHON_TOOL = ToolDefinition(
     name="run_python",
-    description="Execute arbitrary Python code in a safe subprocess with a timeout, returning stdout and stderr.",
+    description="Execute arbitrary Python code in a safe subprocess with a timeout, returning stdout, stderr, and the exit code. Runs inside settings.WORKSPACE_ROOT. Truncates output to 3000 characters from the end.",
     input_schema={
         "type": "object",
         "properties": {
@@ -144,9 +144,24 @@ RUN_PYTHON_TOOL = ToolDefinition(
     }
 )
 
+RUN_TESTS_TOOL = ToolDefinition(
+    name="run_tests",
+    description="Run pytest on a specific path to verify tests. Returns pytest output, capturing test failures and stack traces, truncated to 3,000 characters from the end.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "test_path": {
+                "type": "string",
+                "description": "The path to the test file or directory to run pytest on (absolute or relative to current working directory)."
+            }
+        },
+        "required": ["test_path"]
+    }
+)
+
 SEARCH_WEB_TOOL = ToolDefinition(
     name="search_web",
-    description="Search the web for the given query. Currently a stub.",
+    description="Search the web for the given query using Tavily or DuckDuckGo. Returns at most 5 results, each with a title, URL, and a snippet truncated to 300 characters.",
     input_schema={
         "type": "object",
         "properties": {
@@ -266,33 +281,159 @@ def read_file(path: str) -> str:
     return read_file_content_internal(val)
 
 
-def run_python(code: str, timeout: float = 10.0) -> str:
-    """Executes python code in a subprocess with a timeout and returns output."""
+def truncate_from_end(text: str, max_chars: int = 3000) -> str:
+    """Truncates text to max_chars from the end, adding a truncation notice at the top if needed."""
+    if len(text) > max_chars:
+        return f"... [truncated — showing last {max_chars:,} chars]\n" + text[-max_chars:]
+    return text
+
+
+def _execute_search(query: str) -> list[dict]:
+    tavily_key = settings.TAVILY_API_KEY or os.environ.get("TAVILY_API_KEY")
+    if tavily_key:
+        try:
+            import httpx
+            response = httpx.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": tavily_key,
+                    "query": query,
+                    "max_results": 5
+                },
+                timeout=10.0
+            )
+            if response.status_code == 200:
+                data = response.json()
+                results = []
+                for r in data.get("results", []):
+                    results.append({
+                        "title": r.get("title", ""),
+                        "url": r.get("url", ""),
+                        "snippet": r.get("content", "")
+                    })
+                if results:
+                    return results
+        except Exception:
+            pass
+
+    # Fallback to DuckDuckGo search
     try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            ddg_results = ddgs.text(query, max_results=5)
+            results = []
+            if ddg_results:
+                for r in ddg_results:
+                    results.append({
+                        "title": r.get("title", ""),
+                        "url": r.get("href", ""),
+                        "snippet": r.get("body", "")
+                    })
+            return results
+    except Exception as e:
+        raise RuntimeError(f"Web search failed. Both Tavily and DuckDuckGo search encountered errors. DDG error: {str(e)}")
+
+
+def run_python(code: str, timeout: float = 10.0) -> str:
+    """Executes python code written to a temporary file in a subprocess with a timeout and returns output."""
+    val_ws = Path(settings.WORKSPACE_ROOT).resolve()
+    temp_path = None
+    try:
+        # Create temp file in workspace root so relative imports work correctly
+        with tempfile.NamedTemporaryFile(dir=val_ws, suffix=".py", delete=False, mode="w", encoding="utf-8") as tf:
+            temp_path = Path(tf.name)
+            tf.write(code)
+            
         result = subprocess.run(
-            [sys.executable, "-c", code],
+            [sys.executable, str(temp_path)],
             capture_output=True,
             text=True,
-            timeout=timeout
+            timeout=timeout,
+            cwd=val_ws
         )
-        output = []
-        if result.stdout:
-            output.append(result.stdout)
-        if result.stderr:
-            output.append(f"Stderr:\n{result.stderr}")
-        if result.returncode != 0:
-            output.append(f"Process exited with return code {result.returncode}")
         
-        return "\n".join(output) if output else "Execution completed successfully with no output."
+        stdout_str = result.stdout or ""
+        stderr_str = result.stderr or ""
+        return_code = result.returncode
+        
+        output = f"Return Code: {return_code}\n"
+        if stdout_str:
+            output += f"Stdout:\n{stdout_str}\n"
+        if stderr_str:
+            output += f"Stderr:\n{stderr_str}\n"
+            
+        return truncate_from_end(output, 3000)
     except subprocess.TimeoutExpired:
         return f"Error: Python code execution timed out after {timeout} seconds."
     except Exception as e:
         return f"Error executing Python code: {str(e)}"
+    finally:
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+
+
+def run_tests(test_path: str, timeout: float = 30.0) -> str:
+    """Runs pytest on a specific path and returns the output (truncated from end)."""
+    val = validate_path(test_path, settings.WORKSPACE_ROOT)
+    if isinstance(val, str):
+        return val
+        
+    val_ws = Path(settings.WORKSPACE_ROOT).resolve()
+    try:
+        # Run pytest inside the workspace root cwd
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", str(val)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=val_ws
+        )
+        
+        stdout_str = result.stdout or ""
+        stderr_str = result.stderr or ""
+        return_code = result.returncode
+        
+        output = f"Return Code: {return_code}\n"
+        if stdout_str:
+            output += f"Stdout:\n{stdout_str}\n"
+        if stderr_str:
+            output += f"Stderr:\n{stderr_str}\n"
+            
+        return truncate_from_end(output, 3000)
+    except subprocess.TimeoutExpired:
+        return f"Error: pytest execution timed out after {timeout} seconds."
+    except Exception as e:
+        return f"Error running tests: {str(e)}"
 
 
 def search_web(query: str) -> str:
-    """Stub returning web search not implemented."""
-    return "Web search not yet implemented"
+    """Search the web for the given query using Tavily or DuckDuckGo.
+    Returns at most 5 results, each with a title, URL, and a snippet truncated to 300 characters.
+    """
+    try:
+        results = _execute_search(query)
+        if not results:
+            return f"No search results found for query '{query}'."
+            
+        formatted = []
+        for i, r in enumerate(results[:5], 1):
+            title = r.get("title", "No Title")
+            url = r.get("url", "No URL")
+            snippet = r.get("snippet", "")
+            
+            # Truncate snippet to 300 chars
+            if len(snippet) > 300:
+                snippet = snippet[:300] + "..."
+                
+            formatted.append(f"{i}. {title}\n   URL: {url}\n   Snippet: {snippet}")
+            
+        return "\n\n".join(formatted)
+    except Exception as e:
+        return f"Error performing web search: {str(e)}"
+
 
 
 def list_directory(path: str, pattern: Optional[str] = None) -> str:
