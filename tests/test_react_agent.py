@@ -270,3 +270,64 @@ async def test_react_agent_tracing_exception_safety():
         result = await agent.run("Do something")
         assert result.success is True
         assert result.answer == "Done"
+
+
+# ==============================================================================
+# 5. Test ReActAgent Reflexion Loop & limits
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_react_agent_reflexion_success():
+    mock_client = MagicMock(spec=BaseLLMClient)
+    mock_client.registry = {}
+    
+    loop1_resp = LLMResponse(text="Final Answer: Attempt 1 answer (wrong)", model="test", input_tokens=5, output_tokens=5, cost_usd=0.0)
+    eval1_resp = LLMResponse(text='{"success": false, "reason": "Incorrect math"}', model="test", input_tokens=5, output_tokens=5, cost_usd=0.0)
+    critique_resp = LLMResponse(text="I need to verify subtraction.", model="test", input_tokens=5, output_tokens=5, cost_usd=0.0)
+    loop2_resp = LLMResponse(text="Final Answer: Attempt 2 answer (correct)", model="test", input_tokens=5, output_tokens=5, cost_usd=0.0)
+    eval2_resp = LLMResponse(text='{"success": true, "reason": "Correct math"}', model="test", input_tokens=5, output_tokens=5, cost_usd=0.0)
+    
+    mock_client.chat = AsyncMock(side_effect=[
+        loop1_resp,
+        eval1_resp,
+        critique_resp,
+        loop2_resp,
+        eval2_resp
+    ])
+    
+    agent = ReActAgent(client=mock_client, model="test-model")
+    with patch("src.core.database.DEFAULT_DB_PATH", ":memory:"):
+        result = await agent.run_with_reflection("Calculate subtraction", max_attempts=3)
+        
+        assert result.success is True
+        assert result.answer == "Attempt 2 answer (correct)"
+        assert mock_client.chat.call_count == 5
+
+
+@pytest.mark.asyncio
+async def test_react_agent_reflexion_cap():
+    mock_client = MagicMock(spec=BaseLLMClient)
+    mock_client.registry = {}
+    
+    loop_resp = LLMResponse(text="Final Answer: Wrong answer", model="test", input_tokens=5, output_tokens=5, cost_usd=0.0)
+    eval_resp = LLMResponse(text='{"success": false, "reason": "Incorrect"}', model="test", input_tokens=5, output_tokens=5, cost_usd=0.0)
+    critique_resp = LLMResponse(text="Self critique content", model="test", input_tokens=5, output_tokens=5, cost_usd=0.0)
+    
+    mock_client.chat = AsyncMock(side_effect=[
+        loop_resp,       # Attempt 1 run
+        eval_resp,       # Attempt 1 eval
+        critique_resp,   # Attempt 1 critique
+        loop_resp,       # Attempt 2 run
+        eval_resp,       # Attempt 2 eval
+        critique_resp,   # Attempt 2 critique
+        loop_resp,       # Attempt 3 run
+        eval_resp        # Attempt 3 eval
+    ])
+    
+    agent = ReActAgent(client=mock_client, model="test-model")
+    with patch("src.core.database.DEFAULT_DB_PATH", ":memory:"):
+        result = await agent.run_with_reflection("Calculate math", max_attempts=3)
+        
+        assert result.success is False
+        assert result.answer == "Wrong answer"
+        assert mock_client.chat.call_count == 8

@@ -290,3 +290,143 @@ class ReActAgent:
                 success=False,
                 total_steps=len(steps)
             )
+
+    async def run_with_reflection(self, task: str, max_attempts: int = 3) -> AgentResult:
+        """Executes the task using a Reflexion loop (attempt -> evaluate -> reflect -> retry).
+        Capped at max_attempts (default 3).
+        """
+        critique = None
+        attempt = 1
+        
+        while attempt <= max_attempts:
+            print(f"\n🔮 === [REFLEXION ATTEMPT {attempt}/{max_attempts}] ===")
+            
+            # Prepend the critique to the system prompt if we have one
+            sys_prompt = self.system_prompt
+            if critique:
+                sys_prompt = (
+                    f"### PREVIOUS ATTEMPT SELF-CRITIQUE & LESSONS LEARNED\n"
+                    f"{critique}\n"
+                    f"Use the self-critique above to improve your reasoning, correct your mistakes, and succeed in this attempt.\n"
+                    f"###\n\n"
+                ) + self.system_prompt
+            
+            # Temporarily override system prompt
+            original_sys_prompt = self.system_prompt
+            self.system_prompt = sys_prompt
+            
+            try:
+                result = await self.run(task)
+            except Exception as e:
+                # Wrap loop exception as a failed AgentResult to allow reflection/retry
+                print(f"❌ Attempt {attempt} crashed: {e}")
+                result = AgentResult(
+                    answer=f"Error executing agent run: {str(e)}",
+                    steps=[],
+                    success=False,
+                    total_steps=0
+                )
+            finally:
+                self.system_prompt = original_sys_prompt
+            
+            # Evaluate success
+            model_name = self.model.value if hasattr(self.model, "value") else str(self.model or "unknown-model")
+            success, reason = await evaluate_success(self.client, task, result.answer, model=model_name)
+            print(f"📊 Attempt {attempt} Evaluation: Success={success}, Reason={reason}")
+            
+            # Update the result's success flag based on our evaluator
+            result.success = success
+            
+            if success or attempt == max_attempts:
+                return result
+                
+            print(f"🤔 Attempt failed. Generating self-critique...")
+            critique = await generate_reflection(self.client, task, result.steps, model=model_name)
+            print(f"📝 Critique generated:\n{critique}\n")
+            
+            attempt += 1
+
+
+async def evaluate_success(
+    client: BaseLLMClient,
+    task: str,
+    final_answer: str,
+    model: Optional[str] = None
+) -> Tuple[bool, str]:
+    """Evaluates task completion using rule-based checks and an LLM-as-judge call.
+    Returns (success, reason).
+    """
+    lower_ans = final_answer.lower()
+    
+    # 1. Rule-based checks for tests and errors
+    if "return code: 1" in lower_ans or ("fail" in lower_ans and ("pytest" in lower_ans or "test" in lower_ans)):
+        if "passed" not in lower_ans:
+            return False, "Rule-based check: Detected test failure or non-zero exit code in output."
+            
+    # 2. LLM-as-judge verification
+    prompt = (
+        "You are an objective AI judge evaluating if an autonomous coding agent succeeded at its task.\n\n"
+        f"Task Description:\n{task}\n\n"
+        f"Agent's Final Answer:\n{final_answer}\n\n"
+        "Assess if the agent completed the task successfully based on its final answer and logs.\n"
+        "Output your evaluation strictly in the following JSON format (no other text, no markdown blocks):\n"
+        '{"success": true, "reason": "Reason for success"}\n'
+        'or\n'
+        '{"success": false, "reason": "Reason for failure"}'
+    )
+    
+    try:
+        response = await client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            model=model
+        )
+        text = response.text.strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+        
+        data = json.loads(text)
+        return bool(data.get("success", False)), str(data.get("reason", "No reason provided."))
+    except Exception as e:
+        # Fallback to True if LLM judge fails to avoid blocking the agent run
+        return True, f"LLM judge failed; assumed success. Error: {str(e)}"
+
+
+async def generate_reflection(
+    client: BaseLLMClient,
+    task: str,
+    steps: list[dict],
+    model: Optional[str] = None
+) -> str:
+    """Calls the LLM to reflect on a failed step-by-step trace and generate a self-critique."""
+    trace_lines = []
+    for s in steps:
+        trace_lines.append(
+            f"Step {s['step']}:\n"
+            f"  Thought: {s['thought']}\n"
+            f"  Action: {s['action']}\n"
+            f"  Observation: {s['observation']}\n"
+        )
+    trace_str = "\n".join(trace_lines)
+    
+    prompt = (
+        "You attempted this task and failed. Here is your step-by-step execution trace:\n\n"
+        f"Task:\n{task}\n\n"
+        f"Step-by-step Trace:\n{trace_str}\n\n"
+        "What specifically went wrong? What will you do differently in your next attempt?\n"
+        "Generate a concise self-critique and action plan."
+    )
+    
+    try:
+        response = await client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            model=model
+        )
+        return response.text.strip()
+    except Exception as e:
+        return f"Self-critique generation failed: {str(e)}"
+
