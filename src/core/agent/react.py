@@ -31,16 +31,20 @@ Available Tools:
 
 REACT_SYSTEM_PROMPT = REACT_SYSTEM_PROMPT_TEMPLATE
 
+
 @dataclass
 class AgentResult:
     answer: str
-    steps: list[dict]   # each: {"step": int, "thought": str, "action": str, "observation": str}
+    steps: list[
+        dict
+    ]  # each: {"step": int, "thought": str, "action": str, "observation": str}
     success: bool
     total_steps: int
 
+
 def parse_react_action(text: str) -> Tuple[str, str, dict]:
     """Parses LLM output text for Action or Final Answer blocks.
-    
+
     Returns:
         tuple: (status, tool_name_or_answer, arguments_dict)
         where status can be:
@@ -58,7 +62,11 @@ def parse_react_action(text: str) -> Tuple[str, str, dict]:
             args = json.loads(args_str)
             return "action", tool_name, args
         except json.JSONDecodeError:
-            return "error", "Failed to parse Action arguments as valid JSON", {"raw_args": args_str}
+            return (
+                "error",
+                "Failed to parse Action arguments as valid JSON",
+                {"raw_args": args_str},
+            )
 
     # Look for Final Answer: ...
     final_match = re.search(r"Final Answer:\s*(.*)", text, re.DOTALL)
@@ -71,7 +79,13 @@ def parse_react_action(text: str) -> Tuple[str, str, dict]:
 class ReActAgent:
     """An autonomous agent implementing a pure Python text-based ReAct(Reason + Act) loop."""
 
-    def __init__(self, client: BaseLLMClient, model: Optional[str] = None, system_prompt: Optional[str] = None, max_steps: int = 10):
+    def __init__(
+        self,
+        client: BaseLLMClient,
+        model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        max_steps: int = 10,
+    ):
         self.client = client
         self.model = model
         self.system_prompt = system_prompt or REACT_SYSTEM_PROMPT_TEMPLATE
@@ -94,152 +108,199 @@ class ReActAgent:
         messages = [{"role": "user", "content": f"Task: {task}"}]
         steps = []
         sys_prompt = self._build_system_prompt()
-        
+
         total_cost_usd = 0.0
         total_tokens = 0
-        model_name = self.model.value if hasattr(self.model, "value") else str(self.model or "unknown-model")
+        model_name = (
+            self.model.value
+            if hasattr(self.model, "value")
+            else str(self.model or "unknown-model")
+        )
 
         with AgentTracer(task=task, model=model_name) as tracer:
             for step in range(self.max_steps):
                 step_start_time = time.time()
                 print(f"\n🚀 === [AGENT STEP {step + 1}] ===")
-                
+
                 # 1. Generate next step
                 response = await self.client.chat(
                     messages=messages,
                     system_prompt=sys_prompt,
                     model=self.model,
-                    temperature=0.0
+                    temperature=0.0,
                 )
                 llm_output = response.text
                 print(f"\n[Agent Thought & Action]:\n{llm_output}\n")
-                
+
                 # Append agent response to history
                 messages.append({"role": "assistant", "content": llm_output})
-                
+
                 # Extract Thought
-                thought_match = re.search(r"Thought:\s*(.*?)(?=\s*(Action:|Final Answer:|$))", llm_output, re.DOTALL)
-                thought_text = thought_match.group(1).strip() if thought_match else llm_output.strip()
-                
+                thought_match = re.search(
+                    r"Thought:\s*(.*?)(?=\s*(Action:|Final Answer:|$))",
+                    llm_output,
+                    re.DOTALL,
+                )
+                thought_text = (
+                    thought_match.group(1).strip()
+                    if thought_match
+                    else llm_output.strip()
+                )
+
                 # 2. Parse the step
                 status, value, args = parse_react_action(llm_output)
-                
+
                 if status == "final":
                     print(f"✅ Final Answer Reached: {value}")
-                    steps.append({
-                        "step": step + 1,
-                        "thought": thought_text,
-                        "action": f"Final Answer: {value}",
-                        "observation": ""
-                    })
-                    
+                    steps.append(
+                        {
+                            "step": step + 1,
+                            "thought": thought_text,
+                            "action": f"Final Answer: {value}",
+                            "observation": "",
+                        }
+                    )
+
                     step_latency_ms = int((time.time() - step_start_time) * 1000)
-                    step_tokens = (response.input_tokens + response.output_tokens) if response else 0
+                    step_tokens = (
+                        (response.input_tokens + response.output_tokens)
+                        if response
+                        else 0
+                    )
                     total_tokens += step_tokens
                     total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
-                    
+
                     tracer.total_cost_usd = total_cost_usd
                     tracer.total_tokens = total_tokens
                     tracer.outcome = "success"
-                    
+
                     tracer.log_step(
                         thought=thought_text,
                         action="Final Answer",
                         action_input=json.dumps({"answer": value}),
                         observation="",
                         latency_ms=step_latency_ms,
-                        tokens_used=step_tokens
+                        tokens_used=step_tokens,
                     )
-                    return AgentResult(answer=value, steps=steps, success=True, total_steps=len(steps))
-                    
+                    return AgentResult(
+                        answer=value, steps=steps, success=True, total_steps=len(steps)
+                    )
+
                 elif status == "error":
                     observation = f"Error: Action arguments must be a valid JSON object. Got parsing error for: {args['raw_args']}"
                     print(f"❌ {observation}")
-                    steps.append({
-                        "step": step + 1,
-                        "thought": thought_text,
-                        "action": f"Error Action: {value}",
-                        "observation": observation
-                    })
-                    messages.append({"role": "user", "content": f"Observation: {observation}"})
-                    
+                    steps.append(
+                        {
+                            "step": step + 1,
+                            "thought": thought_text,
+                            "action": f"Error Action: {value}",
+                            "observation": observation,
+                        }
+                    )
+                    messages.append(
+                        {"role": "user", "content": f"Observation: {observation}"}
+                    )
+
                     step_latency_ms = int((time.time() - step_start_time) * 1000)
-                    step_tokens = (response.input_tokens + response.output_tokens) if response else 0
+                    step_tokens = (
+                        (response.input_tokens + response.output_tokens)
+                        if response
+                        else 0
+                    )
                     total_tokens += step_tokens
                     total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
-                    
+
                     tracer.total_cost_usd = total_cost_usd
                     tracer.total_tokens = total_tokens
-                    
+
                     tracer.log_step(
                         thought=thought_text,
                         action=f"Error Action: {value}",
                         action_input=json.dumps(args),
                         observation=observation,
                         latency_ms=step_latency_ms,
-                        tokens_used=step_tokens
+                        tokens_used=step_tokens,
                     )
                     continue
-                    
+
                 elif status == "none":
                     # Fallback check for raw "Final Answer" string in case regex missed formatting
                     if "Final Answer:" in llm_output:
                         answer = llm_output.split("Final Answer:")[-1].strip()
                         print(f"✅ Final Answer Reached (fallback): {answer}")
-                        steps.append({
-                            "step": step + 1,
-                            "thought": thought_text,
-                            "action": f"Final Answer: {answer}",
-                            "observation": ""
-                        })
-                        
+                        steps.append(
+                            {
+                                "step": step + 1,
+                                "thought": thought_text,
+                                "action": f"Final Answer: {answer}",
+                                "observation": "",
+                            }
+                        )
+
                         step_latency_ms = int((time.time() - step_start_time) * 1000)
-                        step_tokens = (response.input_tokens + response.output_tokens) if response else 0
+                        step_tokens = (
+                            (response.input_tokens + response.output_tokens)
+                            if response
+                            else 0
+                        )
                         total_tokens += step_tokens
                         total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
-                        
+
                         tracer.total_cost_usd = total_cost_usd
                         tracer.total_tokens = total_tokens
                         tracer.outcome = "success"
-                        
+
                         tracer.log_step(
                             thought=thought_text,
                             action="Final Answer",
                             action_input=json.dumps({"answer": answer}),
                             observation="",
                             latency_ms=step_latency_ms,
-                            tokens_used=step_tokens
+                            tokens_used=step_tokens,
                         )
-                        return AgentResult(answer=answer, steps=steps, success=True, total_steps=len(steps))
-                    
+                        return AgentResult(
+                            answer=answer,
+                            steps=steps,
+                            success=True,
+                            total_steps=len(steps),
+                        )
+
                     observation = "Error: Invalid output format. You must output exactly: 'Thought: <reasoning>\\nAction: <tool_name> <arguments_json>' or 'Final Answer: <answer>'."
                     print(f"❌ {observation}")
-                    steps.append({
-                        "step": step + 1,
-                        "thought": thought_text,
-                        "action": "None",
-                        "observation": observation
-                    })
-                    messages.append({"role": "user", "content": f"Observation: {observation}"})
-                    
+                    steps.append(
+                        {
+                            "step": step + 1,
+                            "thought": thought_text,
+                            "action": "None",
+                            "observation": observation,
+                        }
+                    )
+                    messages.append(
+                        {"role": "user", "content": f"Observation: {observation}"}
+                    )
+
                     step_latency_ms = int((time.time() - step_start_time) * 1000)
-                    step_tokens = (response.input_tokens + response.output_tokens) if response else 0
+                    step_tokens = (
+                        (response.input_tokens + response.output_tokens)
+                        if response
+                        else 0
+                    )
                     total_tokens += step_tokens
                     total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
-                    
+
                     tracer.total_cost_usd = total_cost_usd
                     tracer.total_tokens = total_tokens
-                    
+
                     tracer.log_step(
                         thought=thought_text,
                         action="None",
                         action_input=json.dumps({}),
                         observation=observation,
                         latency_ms=step_latency_ms,
-                        tokens_used=step_tokens
+                        tokens_used=step_tokens,
                     )
                     continue
-                
+
                 # 3. Dispatch the tool call
                 tool_name = value
                 action_text = f"{tool_name} {json.dumps(args)}"
@@ -251,36 +312,42 @@ class ReActAgent:
                     observation = f"Error: Tool '{tool_name}' is not registered. Available tools: {registered}"
                 except Exception as e:
                     observation = f"Error executing tool: {str(e)}"
-                    
+
                 print(f"📥 Observation: {observation}")
-                
-                steps.append({
-                    "step": step + 1,
-                    "thought": thought_text,
-                    "action": action_text,
-                    "observation": observation
-                })
-                
+
+                steps.append(
+                    {
+                        "step": step + 1,
+                        "thought": thought_text,
+                        "action": action_text,
+                        "observation": observation,
+                    }
+                )
+
                 # Feed tool outcome back as user message
-                messages.append({"role": "user", "content": f"Observation: {observation}"})
-                
+                messages.append(
+                    {"role": "user", "content": f"Observation: {observation}"}
+                )
+
                 step_latency_ms = int((time.time() - step_start_time) * 1000)
-                step_tokens = (response.input_tokens + response.output_tokens) if response else 0
+                step_tokens = (
+                    (response.input_tokens + response.output_tokens) if response else 0
+                )
                 total_tokens += step_tokens
                 total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
-                
+
                 tracer.total_cost_usd = total_cost_usd
                 tracer.total_tokens = total_tokens
-                
+
                 tracer.log_step(
                     thought=thought_text,
                     action=tool_name,
                     action_input=json.dumps(args),
                     observation=observation,
                     latency_ms=step_latency_ms,
-                    tokens_used=step_tokens
+                    tokens_used=step_tokens,
                 )
-                
+
             print("⚠️ Maximum steps reached without completing the task.")
             tracer.outcome = "failure"
             tracer.error_msg = "Maximum steps reached without completing the task."
@@ -288,19 +355,21 @@ class ReActAgent:
                 answer="Failed to complete task within maximum steps limit.",
                 steps=steps,
                 success=False,
-                total_steps=len(steps)
+                total_steps=len(steps),
             )
 
-    async def run_with_reflection(self, task: str, max_attempts: int = 3) -> AgentResult:
+    async def run_with_reflection(
+        self, task: str, max_attempts: int = 3
+    ) -> AgentResult:
         """Executes the task using a Reflexion loop (attempt -> evaluate -> reflect -> retry).
         Capped at max_attempts (default 3).
         """
         critique = None
         attempt = 1
-        
+
         while attempt <= max_attempts:
             print(f"\n🔮 === [REFLEXION ATTEMPT {attempt}/{max_attempts}] ===")
-            
+
             # Prepend the critique to the system prompt if we have one
             sys_prompt = self.system_prompt
             if critique:
@@ -310,11 +379,11 @@ class ReActAgent:
                     f"Use the self-critique above to improve your reasoning, correct your mistakes, and succeed in this attempt.\n"
                     f"###\n\n"
                 ) + self.system_prompt
-            
+
             # Temporarily override system prompt
             original_sys_prompt = self.system_prompt
             self.system_prompt = sys_prompt
-            
+
             try:
                 result = await self.run(task)
             except Exception as e:
@@ -324,45 +393,57 @@ class ReActAgent:
                     answer=f"Error executing agent run: {str(e)}",
                     steps=[],
                     success=False,
-                    total_steps=0
+                    total_steps=0,
                 )
             finally:
                 self.system_prompt = original_sys_prompt
-            
+
             # Evaluate success
-            model_name = self.model.value if hasattr(self.model, "value") else str(self.model or "unknown-model")
-            success, reason = await evaluate_success(self.client, task, result.answer, model=model_name)
-            print(f"📊 Attempt {attempt} Evaluation: Success={success}, Reason={reason}")
-            
+            model_name = (
+                self.model.value
+                if hasattr(self.model, "value")
+                else str(self.model or "unknown-model")
+            )
+            success, reason = await evaluate_success(
+                self.client, task, result.answer, model=model_name
+            )
+            print(
+                f"📊 Attempt {attempt} Evaluation: Success={success}, Reason={reason}"
+            )
+
             # Update the result's success flag based on our evaluator
             result.success = success
-            
+
             if success or attempt == max_attempts:
                 return result
-                
-            print(f"🤔 Attempt failed. Generating self-critique...")
-            critique = await generate_reflection(self.client, task, result.steps, model=model_name)
+
+            print("🤔 Attempt failed. Generating self-critique...")
+            critique = await generate_reflection(
+                self.client, task, result.steps, model=model_name
+            )
             print(f"📝 Critique generated:\n{critique}\n")
-            
+
             attempt += 1
 
 
 async def evaluate_success(
-    client: BaseLLMClient,
-    task: str,
-    final_answer: str,
-    model: Optional[str] = None
+    client: BaseLLMClient, task: str, final_answer: str, model: Optional[str] = None
 ) -> Tuple[bool, str]:
     """Evaluates task completion using rule-based checks and an LLM-as-judge call.
     Returns (success, reason).
     """
     lower_ans = final_answer.lower()
-    
+
     # 1. Rule-based checks for tests and errors
-    if "return code: 1" in lower_ans or ("fail" in lower_ans and ("pytest" in lower_ans or "test" in lower_ans)):
+    if "return code: 1" in lower_ans or (
+        "fail" in lower_ans and ("pytest" in lower_ans or "test" in lower_ans)
+    ):
         if "passed" not in lower_ans:
-            return False, "Rule-based check: Detected test failure or non-zero exit code in output."
-            
+            return (
+                False,
+                "Rule-based check: Detected test failure or non-zero exit code in output.",
+            )
+
     # 2. LLM-as-judge verification
     prompt = (
         "You are an objective AI judge evaluating if an autonomous coding agent succeeded at its task.\n\n"
@@ -371,15 +452,13 @@ async def evaluate_success(
         "Assess if the agent completed the task successfully based on its final answer and logs.\n"
         "Output your evaluation strictly in the following JSON format (no other text, no markdown blocks):\n"
         '{"success": true, "reason": "Reason for success"}\n'
-        'or\n'
+        "or\n"
         '{"success": false, "reason": "Reason for failure"}'
     )
-    
+
     try:
         response = await client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            model=model
+            messages=[{"role": "user", "content": prompt}], temperature=0.0, model=model
         )
         text = response.text.strip()
         if text.startswith("```json"):
@@ -387,19 +466,18 @@ async def evaluate_success(
         if text.endswith("```"):
             text = text[:-3]
         text = text.strip()
-        
+
         data = json.loads(text)
-        return bool(data.get("success", False)), str(data.get("reason", "No reason provided."))
+        return bool(data.get("success", False)), str(
+            data.get("reason", "No reason provided.")
+        )
     except Exception as e:
         # Fallback to True if LLM judge fails to avoid blocking the agent run
         return True, f"LLM judge failed; assumed success. Error: {str(e)}"
 
 
 async def generate_reflection(
-    client: BaseLLMClient,
-    task: str,
-    steps: list[dict],
-    model: Optional[str] = None
+    client: BaseLLMClient, task: str, steps: list[dict], model: Optional[str] = None
 ) -> str:
     """Calls the LLM to reflect on a failed step-by-step trace and generate a self-critique."""
     trace_lines = []
@@ -411,7 +489,7 @@ async def generate_reflection(
             f"  Observation: {s['observation']}\n"
         )
     trace_str = "\n".join(trace_lines)
-    
+
     prompt = (
         "You attempted this task and failed. Here is your step-by-step execution trace:\n\n"
         f"Task:\n{task}\n\n"
@@ -419,14 +497,11 @@ async def generate_reflection(
         "What specifically went wrong? What will you do differently in your next attempt?\n"
         "Generate a concise self-critique and action plan."
     )
-    
+
     try:
         response = await client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            model=model
+            messages=[{"role": "user", "content": prompt}], temperature=0.0, model=model
         )
         return response.text.strip()
     except Exception as e:
         return f"Self-critique generation failed: {str(e)}"
-
