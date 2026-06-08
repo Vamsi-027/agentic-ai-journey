@@ -87,108 +87,206 @@ class ReActAgent:
         return self.system_prompt
 
     async def run(self, task: str) -> AgentResult:
-        """Runs the ReAct loop to complete the given task, logging each intermediate step."""
+        """Runs the ReAct loop to complete the given task, logging each intermediate step to SQLite tracing."""
+        from src.core.database import AgentTracer
+        import time
+
         messages = [{"role": "user", "content": f"Task: {task}"}]
         steps = []
         sys_prompt = self._build_system_prompt()
         
-        for step in range(self.max_steps):
-            print(f"\n🚀 === [AGENT STEP {step + 1}] ===")
-            
-            # 1. Generate next step
-            response = await self.client.chat(
-                messages=messages,
-                system_prompt=sys_prompt,
-                model=self.model,
-                temperature=0.0
-            )
-            llm_output = response.text
-            print(f"\n[Agent Thought & Action]:\n{llm_output}\n")
-            
-            # Append agent response to history
-            messages.append({"role": "assistant", "content": llm_output})
-            
-            # Extract Thought
-            thought_match = re.search(r"Thought:\s*(.*?)(?=\s*(Action:|Final Answer:|$))", llm_output, re.DOTALL)
-            thought_text = thought_match.group(1).strip() if thought_match else llm_output.strip()
-            
-            # 2. Parse the step
-            status, value, args = parse_react_action(llm_output)
-            
-            if status == "final":
-                print(f"✅ Final Answer Reached: {value}")
-                steps.append({
-                    "step": step + 1,
-                    "thought": thought_text,
-                    "action": f"Final Answer: {value}",
-                    "observation": ""
-                })
-                return AgentResult(answer=value, steps=steps, success=True, total_steps=len(steps))
+        total_cost_usd = 0.0
+        total_tokens = 0
+        model_name = self.model.value if hasattr(self.model, "value") else str(self.model or "unknown-model")
+
+        with AgentTracer(task=task, model=model_name) as tracer:
+            for step in range(self.max_steps):
+                step_start_time = time.time()
+                print(f"\n🚀 === [AGENT STEP {step + 1}] ===")
                 
-            elif status == "error":
-                observation = f"Error: Action arguments must be a valid JSON object. Got parsing error for: {args['raw_args']}"
-                print(f"❌ {observation}")
-                steps.append({
-                    "step": step + 1,
-                    "thought": thought_text,
-                    "action": f"Error Action: {value}",
-                    "observation": observation
-                })
-                messages.append({"role": "user", "content": f"Observation: {observation}"})
-                continue
+                # 1. Generate next step
+                response = await self.client.chat(
+                    messages=messages,
+                    system_prompt=sys_prompt,
+                    model=self.model,
+                    temperature=0.0
+                )
+                llm_output = response.text
+                print(f"\n[Agent Thought & Action]:\n{llm_output}\n")
                 
-            elif status == "none":
-                # Fallback check for raw "Final Answer" string in case regex missed formatting
-                if "Final Answer:" in llm_output:
-                    answer = llm_output.split("Final Answer:")[-1].strip()
-                    print(f"✅ Final Answer Reached (fallback): {answer}")
+                # Append agent response to history
+                messages.append({"role": "assistant", "content": llm_output})
+                
+                # Extract Thought
+                thought_match = re.search(r"Thought:\s*(.*?)(?=\s*(Action:|Final Answer:|$))", llm_output, re.DOTALL)
+                thought_text = thought_match.group(1).strip() if thought_match else llm_output.strip()
+                
+                # 2. Parse the step
+                status, value, args = parse_react_action(llm_output)
+                
+                if status == "final":
+                    print(f"✅ Final Answer Reached: {value}")
                     steps.append({
                         "step": step + 1,
                         "thought": thought_text,
-                        "action": f"Final Answer: {answer}",
+                        "action": f"Final Answer: {value}",
                         "observation": ""
                     })
-                    return AgentResult(answer=answer, steps=steps, success=True, total_steps=len(steps))
+                    
+                    step_latency_ms = int((time.time() - step_start_time) * 1000)
+                    step_tokens = (response.input_tokens + response.output_tokens) if response else 0
+                    total_tokens += step_tokens
+                    total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
+                    
+                    tracer.total_cost_usd = total_cost_usd
+                    tracer.total_tokens = total_tokens
+                    tracer.outcome = "success"
+                    
+                    tracer.log_step(
+                        thought=thought_text,
+                        action="Final Answer",
+                        action_input=json.dumps({"answer": value}),
+                        observation="",
+                        latency_ms=step_latency_ms,
+                        tokens_used=step_tokens
+                    )
+                    return AgentResult(answer=value, steps=steps, success=True, total_steps=len(steps))
+                    
+                elif status == "error":
+                    observation = f"Error: Action arguments must be a valid JSON object. Got parsing error for: {args['raw_args']}"
+                    print(f"❌ {observation}")
+                    steps.append({
+                        "step": step + 1,
+                        "thought": thought_text,
+                        "action": f"Error Action: {value}",
+                        "observation": observation
+                    })
+                    messages.append({"role": "user", "content": f"Observation: {observation}"})
+                    
+                    step_latency_ms = int((time.time() - step_start_time) * 1000)
+                    step_tokens = (response.input_tokens + response.output_tokens) if response else 0
+                    total_tokens += step_tokens
+                    total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
+                    
+                    tracer.total_cost_usd = total_cost_usd
+                    tracer.total_tokens = total_tokens
+                    
+                    tracer.log_step(
+                        thought=thought_text,
+                        action=f"Error Action: {value}",
+                        action_input=json.dumps(args),
+                        observation=observation,
+                        latency_ms=step_latency_ms,
+                        tokens_used=step_tokens
+                    )
+                    continue
+                    
+                elif status == "none":
+                    # Fallback check for raw "Final Answer" string in case regex missed formatting
+                    if "Final Answer:" in llm_output:
+                        answer = llm_output.split("Final Answer:")[-1].strip()
+                        print(f"✅ Final Answer Reached (fallback): {answer}")
+                        steps.append({
+                            "step": step + 1,
+                            "thought": thought_text,
+                            "action": f"Final Answer: {answer}",
+                            "observation": ""
+                        })
+                        
+                        step_latency_ms = int((time.time() - step_start_time) * 1000)
+                        step_tokens = (response.input_tokens + response.output_tokens) if response else 0
+                        total_tokens += step_tokens
+                        total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
+                        
+                        tracer.total_cost_usd = total_cost_usd
+                        tracer.total_tokens = total_tokens
+                        tracer.outcome = "success"
+                        
+                        tracer.log_step(
+                            thought=thought_text,
+                            action="Final Answer",
+                            action_input=json.dumps({"answer": answer}),
+                            observation="",
+                            latency_ms=step_latency_ms,
+                            tokens_used=step_tokens
+                        )
+                        return AgentResult(answer=answer, steps=steps, success=True, total_steps=len(steps))
+                    
+                    observation = "Error: Invalid output format. You must output exactly: 'Thought: <reasoning>\\nAction: <tool_name> <arguments_json>' or 'Final Answer: <answer>'."
+                    print(f"❌ {observation}")
+                    steps.append({
+                        "step": step + 1,
+                        "thought": thought_text,
+                        "action": "None",
+                        "observation": observation
+                    })
+                    messages.append({"role": "user", "content": f"Observation: {observation}"})
+                    
+                    step_latency_ms = int((time.time() - step_start_time) * 1000)
+                    step_tokens = (response.input_tokens + response.output_tokens) if response else 0
+                    total_tokens += step_tokens
+                    total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
+                    
+                    tracer.total_cost_usd = total_cost_usd
+                    tracer.total_tokens = total_tokens
+                    
+                    tracer.log_step(
+                        thought=thought_text,
+                        action="None",
+                        action_input=json.dumps({}),
+                        observation=observation,
+                        latency_ms=step_latency_ms,
+                        tokens_used=step_tokens
+                    )
+                    continue
                 
-                observation = "Error: Invalid output format. You must output exactly: 'Thought: <reasoning>\\nAction: <tool_name> <arguments_json>' or 'Final Answer: <answer>'."
-                print(f"❌ {observation}")
+                # 3. Dispatch the tool call
+                tool_name = value
+                action_text = f"{tool_name} {json.dumps(args)}"
+                print(f"🔧 Dispatching tool: '{tool_name}' with args: {args}")
+                try:
+                    observation = await self.client.dispatch(tool_name, args)
+                except KeyError:
+                    registered = list(self.client.registry.keys())
+                    observation = f"Error: Tool '{tool_name}' is not registered. Available tools: {registered}"
+                except Exception as e:
+                    observation = f"Error executing tool: {str(e)}"
+                    
+                print(f"📥 Observation: {observation}")
+                
                 steps.append({
                     "step": step + 1,
                     "thought": thought_text,
-                    "action": "None",
+                    "action": action_text,
                     "observation": observation
                 })
-                messages.append({"role": "user", "content": f"Observation: {observation}"})
-                continue
-            
-            # 3. Dispatch the tool call
-            tool_name = value
-            action_text = f"{tool_name} {json.dumps(args)}"
-            print(f"🔧 Dispatching tool: '{tool_name}' with args: {args}")
-            try:
-                observation = await self.client.dispatch(tool_name, args)
-            except KeyError:
-                registered = list(self.client.registry.keys())
-                observation = f"Error: Tool '{tool_name}' is not registered. Available tools: {registered}"
-            except Exception as e:
-                observation = f"Error executing tool: {str(e)}"
                 
-            print(f"📥 Observation: {observation}")
-            
-            steps.append({
-                "step": step + 1,
-                "thought": thought_text,
-                "action": action_text,
-                "observation": observation
-            })
-            
-            # Feed tool outcome back as user message
-            messages.append({"role": "user", "content": f"Observation: {observation}"})
-            
-        print("⚠️ Maximum steps reached without completing the task.")
-        return AgentResult(
-            answer="Failed to complete task within maximum steps limit.",
-            steps=steps,
-            success=False,
-            total_steps=len(steps)
-        )
+                # Feed tool outcome back as user message
+                messages.append({"role": "user", "content": f"Observation: {observation}"})
+                
+                step_latency_ms = int((time.time() - step_start_time) * 1000)
+                step_tokens = (response.input_tokens + response.output_tokens) if response else 0
+                total_tokens += step_tokens
+                total_cost_usd += getattr(response, "cost_usd", 0.0) or 0.0
+                
+                tracer.total_cost_usd = total_cost_usd
+                tracer.total_tokens = total_tokens
+                
+                tracer.log_step(
+                    thought=thought_text,
+                    action=tool_name,
+                    action_input=json.dumps(args),
+                    observation=observation,
+                    latency_ms=step_latency_ms,
+                    tokens_used=step_tokens
+                )
+                
+            print("⚠️ Maximum steps reached without completing the task.")
+            tracer.outcome = "failure"
+            tracer.error_msg = "Maximum steps reached without completing the task."
+            return AgentResult(
+                answer="Failed to complete task within maximum steps limit.",
+                steps=steps,
+                success=False,
+                total_steps=len(steps)
+            )

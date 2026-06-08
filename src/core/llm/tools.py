@@ -12,18 +12,19 @@ from src.core.config import settings
 # Helper functions for validation & encoding
 # ==============================================================================
 
+
 def validate_path(path: str, workspace_root: Path | str) -> Path | str:
     """Resolves target path and checks it remains strictly within the workspace root."""
     try:
         workspace_path = Path(workspace_root).resolve()
-        
+
         # If relative, resolve it relative to the workspace root
         input_path = Path(path)
         if not input_path.is_absolute():
             target_path = (workspace_path / input_path).resolve()
         else:
             target_path = input_path.resolve()
-        
+
         try:
             target_path.relative_to(workspace_path)
             return target_path
@@ -35,9 +36,12 @@ def validate_path(path: str, workspace_root: Path | str) -> Path | str:
 
 _SKIP_PREFIXES = (".", "__")
 
+
 def _should_skip(p: Path, base: Path) -> bool:
     try:
-        return any(part.startswith(_SKIP_PREFIXES) for part in p.relative_to(base).parts)
+        return any(
+            part.startswith(_SKIP_PREFIXES) for part in p.relative_to(base).parts
+        )
     except ValueError:
         return True
 
@@ -47,45 +51,52 @@ def read_file_content_internal(path: Path) -> str:
     try:
         with open(path, "rb") as f:
             raw_data = f.read()
-        
+
         if not raw_data:
             return ""
-            
+
         content = None
         # 1. Try UTF-8 first
         try:
             content = raw_data.decode("utf-8")
         except UnicodeDecodeError:
             pass
-            
+
         # 2. Try UTF-16 if BOM is present
         if content is None:
-            if raw_data.startswith((b'\xff\xfe', b'\xfe\xff')):
+            if raw_data.startswith((b"\xff\xfe", b"\xfe\xff")):
                 try:
                     content = raw_data.decode("utf-16")
                 except Exception:
                     pass
-                
+
         # 3. Try charset_normalizer with high confidence threshold
         if content is None:
             detected = charset_normalizer.detect(raw_data)
             encoding = detected.get("encoding")
             confidence = detected.get("confidence", 0.0)
-            
-            if encoding and confidence > 0.85 and not (encoding.startswith("utf_16") and len(raw_data) < 10):
+
+            if (
+                encoding
+                and confidence > 0.85
+                and not (encoding.startswith("utf_16") and len(raw_data) < 10)
+            ):
                 try:
                     content = raw_data.decode(encoding)
                 except Exception:
                     pass
-                
+
         # 4. Fallback to ISO-8859-1 (Latin-1)
         if content is None:
             content = raw_data.decode("latin-1")
 
         MAX_CHARS = 50_000
         if len(content) > MAX_CHARS:
-            content = content[:MAX_CHARS] + f"\n\n... [truncated — {len(content):,} total chars, showing first {MAX_CHARS:,}]"
-            
+            content = (
+                content[:MAX_CHARS]
+                + f"\n\n... [truncated — {len(content):,} total chars, showing first {MAX_CHARS:,}]"
+            )
+
         return content
     except Exception as e:
         return f"Error: Failed to read or decode file: {str(e)}"
@@ -103,15 +114,15 @@ WRITE_FILE_TOOL = ToolDefinition(
         "properties": {
             "path": {
                 "type": "string",
-                "description": "The target file path (absolute or relative to current working directory)."
+                "description": "The target file path (absolute or relative to current working directory).",
             },
             "content": {
                 "type": "string",
-                "description": "The exact text content to write to the file."
-            }
+                "description": "The exact text content to write to the file.",
+            },
         },
-        "required": ["path", "content"]
-    }
+        "required": ["path", "content"],
+    },
 )
 
 READ_FILE_TOOL = ToolDefinition(
@@ -122,11 +133,11 @@ READ_FILE_TOOL = ToolDefinition(
         "properties": {
             "path": {
                 "type": "string",
-                "description": "The path to the file to read (absolute or relative to current working directory)."
+                "description": "The path to the file to read (absolute or relative to current working directory).",
             }
         },
-        "required": ["path"]
-    }
+        "required": ["path"],
+    },
 )
 
 RUN_PYTHON_TOOL = ToolDefinition(
@@ -137,11 +148,11 @@ RUN_PYTHON_TOOL = ToolDefinition(
         "properties": {
             "code": {
                 "type": "string",
-                "description": "The complete Python script or code block to execute."
+                "description": "The complete Python script or code block to execute.",
             }
         },
-        "required": ["code"]
-    }
+        "required": ["code"],
+    },
 )
 
 RUN_TESTS_TOOL = ToolDefinition(
@@ -152,11 +163,11 @@ RUN_TESTS_TOOL = ToolDefinition(
         "properties": {
             "test_path": {
                 "type": "string",
-                "description": "The path to the test file or directory to run pytest on (absolute or relative to current working directory)."
+                "description": "The path to the test file or directory to run pytest on (absolute or relative to current working directory).",
             }
         },
-        "required": ["test_path"]
-    }
+        "required": ["test_path"],
+    },
 )
 
 SEARCH_WEB_TOOL = ToolDefinition(
@@ -167,11 +178,11 @@ SEARCH_WEB_TOOL = ToolDefinition(
         "properties": {
             "query": {
                 "type": "string",
-                "description": "The search term or query to lookup on the web."
+                "description": "The search term or query to lookup on the web.",
             }
         },
-        "required": ["query"]
-    }
+        "required": ["query"],
+    },
 )
 
 LIST_DIRECTORY_TOOL = ToolDefinition(
@@ -182,15 +193,15 @@ LIST_DIRECTORY_TOOL = ToolDefinition(
         "properties": {
             "path": {
                 "type": "string",
-                "description": "The path to the directory to list (absolute or relative to current working directory)."
+                "description": "The path to the directory to list (absolute or relative to current working directory).",
             },
             "pattern": {
                 "type": "string",
-                "description": "Optional glob pattern to filter files (e.g., '*.py')."
-            }
+                "description": "Optional glob pattern to filter files (e.g., '*.py').",
+            },
         },
-        "required": ["path"]
-    }
+        "required": ["path"],
+    },
 )
 
 SEARCH_IN_FILES_TOOL = ToolDefinition(
@@ -201,19 +212,19 @@ SEARCH_IN_FILES_TOOL = ToolDefinition(
         "properties": {
             "query": {
                 "type": "string",
-                "description": "The exact string query to search for."
+                "description": "The exact string query to search for.",
             },
             "path": {
                 "type": "string",
-                "description": "The directory or file path to search inside."
+                "description": "The directory or file path to search inside.",
             },
             "file_pattern": {
                 "type": "string",
-                "description": "Optional glob pattern to filter which files to search (e.g., '*.py')."
-            }
+                "description": "Optional glob pattern to filter which files to search (e.g., '*.py').",
+            },
         },
-        "required": ["query", "path"]
-    }
+        "required": ["query", "path"],
+    },
 )
 
 EDIT_FILE_TOOL = ToolDefinition(
@@ -222,21 +233,18 @@ EDIT_FILE_TOOL = ToolDefinition(
     input_schema={
         "type": "object",
         "properties": {
-            "path": {
-                "type": "string",
-                "description": "The path to the file to edit."
-            },
+            "path": {"type": "string", "description": "The path to the file to edit."},
             "old_str": {
                 "type": "string",
-                "description": "The exact unique string/block of text in the file to replace."
+                "description": "The exact unique string/block of text in the file to replace.",
             },
             "new_str": {
                 "type": "string",
-                "description": "The new replacement string/block of text."
-            }
+                "description": "The new replacement string/block of text.",
+            },
         },
-        "required": ["path", "old_str", "new_str"]
-    }
+        "required": ["path", "old_str", "new_str"],
+    },
 )
 
 
@@ -244,24 +252,27 @@ EDIT_FILE_TOOL = ToolDefinition(
 # Tool Implementations
 # ==============================================================================
 
+
 def write_file(path: str, content: str) -> str:
     """Writes content to a file at path atomically using a temporary file."""
     val = validate_path(path, settings.WORKSPACE_ROOT)
     if isinstance(val, str):
         return val
-        
+
     try:
         val.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Atomic write via temp file in target directory
-        with tempfile.NamedTemporaryFile(dir=val.parent, delete=False, mode="w", encoding="utf-8") as temp_file:
+        with tempfile.NamedTemporaryFile(
+            dir=val.parent, delete=False, mode="w", encoding="utf-8"
+        ) as temp_file:
             temp_path = Path(temp_file.name)
             temp_file.write(content)
-            
+
         os.replace(temp_path, val)
         return f"File written successfully to {path}"
     except Exception as e:
-        if 'temp_path' in locals() and temp_path.exists():
+        if "temp_path" in locals() and temp_path.exists():
             try:
                 os.remove(temp_path)
             except Exception:
@@ -274,17 +285,19 @@ def read_file(path: str) -> str:
     val = validate_path(path, settings.WORKSPACE_ROOT)
     if isinstance(val, str):
         return val
-        
+
     if not val.is_file():
         return f"Error: The file at '{path}' does not exist or is not a file."
-        
+
     return read_file_content_internal(val)
 
 
 def truncate_from_end(text: str, max_chars: int = 3000) -> str:
     """Truncates text to max_chars from the end, adding a truncation notice at the top if needed."""
     if len(text) > max_chars:
-        return f"... [truncated — showing last {max_chars:,} chars]\n" + text[-max_chars:]
+        return (
+            f"... [truncated — showing last {max_chars:,} chars]\n" + text[-max_chars:]
+        )
     return text
 
 
@@ -293,24 +306,23 @@ def _execute_search(query: str) -> list[dict]:
     if tavily_key:
         try:
             import httpx
+
             response = httpx.post(
                 "https://api.tavily.com/search",
-                json={
-                    "api_key": tavily_key,
-                    "query": query,
-                    "max_results": 5
-                },
-                timeout=10.0
+                json={"api_key": tavily_key, "query": query, "max_results": 5},
+                timeout=10.0,
             )
             if response.status_code == 200:
                 data = response.json()
                 results = []
                 for r in data.get("results", []):
-                    results.append({
-                        "title": r.get("title", ""),
-                        "url": r.get("url", ""),
-                        "snippet": r.get("content", "")
-                    })
+                    results.append(
+                        {
+                            "title": r.get("title", ""),
+                            "url": r.get("url", ""),
+                            "snippet": r.get("content", ""),
+                        }
+                    )
                 if results:
                     return results
         except Exception:
@@ -319,19 +331,24 @@ def _execute_search(query: str) -> list[dict]:
     # Fallback to DuckDuckGo search
     try:
         from duckduckgo_search import DDGS
+
         with DDGS() as ddgs:
             ddg_results = ddgs.text(query, max_results=5)
             results = []
             if ddg_results:
                 for r in ddg_results:
-                    results.append({
-                        "title": r.get("title", ""),
-                        "url": r.get("href", ""),
-                        "snippet": r.get("body", "")
-                    })
+                    results.append(
+                        {
+                            "title": r.get("title", ""),
+                            "url": r.get("href", ""),
+                            "snippet": r.get("body", ""),
+                        }
+                    )
             return results
     except Exception as e:
-        raise RuntimeError(f"Web search failed. Both Tavily and DuckDuckGo search encountered errors. DDG error: {str(e)}")
+        raise RuntimeError(
+            f"Web search failed. Both Tavily and DuckDuckGo search encountered errors. DDG error: {str(e)}"
+        )
 
 
 def run_python(code: str, timeout: float = 10.0) -> str:
@@ -340,28 +357,30 @@ def run_python(code: str, timeout: float = 10.0) -> str:
     temp_path = None
     try:
         # Create temp file in workspace root so relative imports work correctly
-        with tempfile.NamedTemporaryFile(dir=val_ws, suffix=".py", delete=False, mode="w", encoding="utf-8") as tf:
+        with tempfile.NamedTemporaryFile(
+            dir=val_ws, suffix=".py", delete=False, mode="w", encoding="utf-8"
+        ) as tf:
             temp_path = Path(tf.name)
             tf.write(code)
-            
+
         result = subprocess.run(
             [sys.executable, str(temp_path)],
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=val_ws
+            cwd=val_ws,
         )
-        
+
         stdout_str = result.stdout or ""
         stderr_str = result.stderr or ""
         return_code = result.returncode
-        
+
         output = f"Return Code: {return_code}\n"
         if stdout_str:
             output += f"Stdout:\n{stdout_str}\n"
         if stderr_str:
             output += f"Stderr:\n{stderr_str}\n"
-            
+
         return truncate_from_end(output, 3000)
     except subprocess.TimeoutExpired:
         return f"Error: Python code execution timed out after {timeout} seconds."
@@ -380,7 +399,7 @@ def run_tests(test_path: str, timeout: float = 30.0) -> str:
     val = validate_path(test_path, settings.WORKSPACE_ROOT)
     if isinstance(val, str):
         return val
-        
+
     val_ws = Path(settings.WORKSPACE_ROOT).resolve()
     try:
         # Run pytest inside the workspace root cwd
@@ -389,19 +408,19 @@ def run_tests(test_path: str, timeout: float = 30.0) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=val_ws
+            cwd=val_ws,
         )
-        
+
         stdout_str = result.stdout or ""
         stderr_str = result.stderr or ""
         return_code = result.returncode
-        
+
         output = f"Return Code: {return_code}\n"
         if stdout_str:
             output += f"Stdout:\n{stdout_str}\n"
         if stderr_str:
             output += f"Stderr:\n{stderr_str}\n"
-            
+
         return truncate_from_end(output, 3000)
     except subprocess.TimeoutExpired:
         return f"Error: pytest execution timed out after {timeout} seconds."
@@ -417,23 +436,22 @@ def search_web(query: str) -> str:
         results = _execute_search(query)
         if not results:
             return f"No search results found for query '{query}'."
-            
+
         formatted = []
         for i, r in enumerate(results[:5], 1):
             title = r.get("title", "No Title")
             url = r.get("url", "No URL")
             snippet = r.get("snippet", "")
-            
+
             # Truncate snippet to 300 chars
             if len(snippet) > 300:
                 snippet = snippet[:300] + "..."
-                
+
             formatted.append(f"{i}. {title}\n   URL: {url}\n   Snippet: {snippet}")
-            
+
         return "\n\n".join(formatted)
     except Exception as e:
         return f"Error performing web search: {str(e)}"
-
 
 
 def list_directory(path: str, pattern: Optional[str] = None) -> str:
@@ -441,10 +459,10 @@ def list_directory(path: str, pattern: Optional[str] = None) -> str:
     val = validate_path(path, settings.WORKSPACE_ROOT)
     if isinstance(val, str):
         return val
-        
+
     if not val.is_dir():
         return f"Error: '{path}' is not a directory."
-        
+
     try:
         glob_pattern = pattern or "*"
         files_found = []
@@ -456,17 +474,17 @@ def list_directory(path: str, pattern: Optional[str] = None) -> str:
                 file_val = validate_path(str(p), settings.WORKSPACE_ROOT)
                 if isinstance(file_val, str):
                     continue
-                    
+
                 try:
                     rel_path = p.relative_to(val)
                     size = p.stat().st_size
                     files_found.append((str(rel_path), size))
                 except Exception:
                     continue
-                    
+
         if not files_found:
             return f"No files found matching '{glob_pattern}' in '{path}'."
-            
+
         files_found.sort()
         lines = [f"- {rel} ({size} bytes)" for rel, size in files_found]
         return "\n".join(lines)
@@ -479,14 +497,14 @@ def search_in_files(query: str, path: str, file_pattern: Optional[str] = None) -
     val = validate_path(path, settings.WORKSPACE_ROOT)
     if isinstance(val, str):
         return val
-        
+
     if not val.exists():
         return f"Error: '{path}' does not exist."
-        
+
     try:
         glob_pattern = file_pattern or "*"
         files_to_search = []
-        
+
         if val.is_file():
             if file_pattern:
                 if val.match(file_pattern):
@@ -495,7 +513,7 @@ def search_in_files(query: str, path: str, file_pattern: Optional[str] = None) -
                 files_to_search = [val]
         else:
             files_to_search = [p for p in val.rglob(glob_pattern) if p.is_file()]
-            
+
         results = []
         base_dir = val if val.is_dir() else val.parent
         for file_path in files_to_search:
@@ -504,16 +522,18 @@ def search_in_files(query: str, path: str, file_pattern: Optional[str] = None) -
             file_val = validate_path(str(file_path), settings.WORKSPACE_ROOT)
             if isinstance(file_val, str):
                 continue
-                
+
             content = read_file_content_internal(file_val)
             if content.startswith("Error"):
                 continue
-                
+
             lines = content.splitlines()
             for line_num, line in enumerate(lines, 1):
                 if query in line:
                     try:
-                        rel_path = file_path.relative_to(Path(settings.WORKSPACE_ROOT).resolve())
+                        rel_path = file_path.relative_to(
+                            Path(settings.WORKSPACE_ROOT).resolve()
+                        )
                     except Exception:
                         rel_path = file_path
                     results.append(f"{rel_path}:{line_num}: {line.strip()}")
@@ -522,7 +542,7 @@ def search_in_files(query: str, path: str, file_pattern: Optional[str] = None) -
             if len(results) >= 100:
                 results.append("... (additional matches truncated)")
                 break
-                
+
         if not results:
             return f"No matches found for query '{query}' in '{path}'."
         return "\n".join(results)
@@ -535,27 +555,27 @@ def edit_file(path: str, old_str: str, new_str: str) -> str:
     val = validate_path(path, settings.WORKSPACE_ROOT)
     if isinstance(val, str):
         return val
-        
+
     if not val.is_file():
         return f"Error: '{path}' is not a file."
-        
+
     try:
         content = read_file_content_internal(val)
         if content.startswith("Error"):
             return content
-            
+
         occurrences = content.count(old_str)
         if occurrences == 0:
             return f"Error: old_str not found in the file '{path}'."
         if occurrences > 1:
             return f"Error: old_str found multiple times ({occurrences}) in the file '{path}'. Be more specific."
-            
+
         new_content = content.replace(old_str, new_str, 1)
-        
+
         write_res = write_file(path, new_content)
         if write_res.startswith("Error"):
             return write_res
-            
+
         return f"File '{path}' edited successfully."
     except Exception as e:
         return f"Error editing file '{path}': {str(e)}"

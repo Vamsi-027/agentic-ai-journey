@@ -168,3 +168,105 @@ async def test_react_agent_unregistered_tool():
     assert result.total_steps == 2
     # The first step should have an observation with the available tools list
     assert "Available tools: ['tool_a']" in result.steps[0]["observation"]
+
+
+# ==============================================================================
+# 4. Test ReActAgent Tracing & SQLite Log Integration
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_react_agent_tracing_success(tmp_path):
+    import sqlite3
+    db_path = tmp_path / "test_trace.db"
+    
+    mock_client = MagicMock(spec=BaseLLMClient)
+    mock_client.registry = {}
+    tool_def = ToolDefinition(name="calc_tool", description="Calculates", input_schema={})
+    mock_client.registry["calc_tool"] = (tool_def, lambda: "res")
+    mock_client.dispatch = AsyncMock(return_value="result of 2+2")
+    
+    resp1 = LLMResponse(
+        text='Thought: Let\'s calculate.\nAction: calc_tool {"expr": "2+2"}',
+        model="test-model",
+        input_tokens=10,
+        output_tokens=15,
+        cost_usd=0.01,
+        stop_reason="end_turn"
+    )
+    resp2 = LLMResponse(
+        text="Thought: I have calculated.\nFinal Answer: 4",
+        model="test-model",
+        input_tokens=20,
+        output_tokens=25,
+        cost_usd=0.02,
+        stop_reason="end_turn"
+    )
+    mock_client.chat = AsyncMock(side_effect=[resp1, resp2])
+    
+    with patch("src.core.database.DEFAULT_DB_PATH", str(db_path)):
+        agent = ReActAgent(client=mock_client, model="test-model")
+        result = await agent.run("Calculate 2+2")
+        
+        assert result.success is True
+        
+        # Connect to test db and verify records
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        
+        # Check agent_runs
+        cursor.execute("SELECT run_id, task, model, outcome, total_tokens, total_cost_usd, started_at, finished_at FROM agent_runs")
+        runs = cursor.fetchall()
+        assert len(runs) == 1
+        run_id, task, model, outcome, total_tokens, total_cost_usd, started_at, finished_at = runs[0]
+        assert task == "Calculate 2+2"
+        assert model == "test-model"
+        assert outcome == "success"
+        assert total_tokens == 70  # (10+15) + (20+25)
+        assert total_cost_usd == pytest.approx(0.03)
+        assert started_at is not None
+        assert finished_at is not None
+        
+        # Check agent_steps
+        cursor.execute("SELECT step_num, thought, action, action_input, observation, tokens_used FROM agent_steps ORDER BY step_num")
+        steps = cursor.fetchall()
+        assert len(steps) == 2
+        
+        # Step 1
+        assert steps[0][0] == 1
+        assert "Let's calculate." in steps[0][1]
+        assert steps[0][2] == "calc_tool"
+        assert "2+2" in steps[0][3]
+        assert steps[0][4] == "result of 2+2"
+        assert steps[0][5] == 25
+        
+        # Step 2
+        assert steps[1][0] == 2
+        assert "I have calculated." in steps[1][1]
+        assert steps[1][2] == "Final Answer"
+        assert "4" in steps[1][3]
+        assert steps[1][5] == 45
+        
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_react_agent_tracing_exception_safety():
+    import sqlite3
+    mock_client = MagicMock(spec=BaseLLMClient)
+    mock_client.registry = {}
+    mock_client.chat = AsyncMock(return_value=LLMResponse(
+        text="Final Answer: Done",
+        model="test-model",
+        input_tokens=5,
+        output_tokens=5,
+        cost_usd=0.0,
+        stop_reason="end_turn"
+    ))
+    
+    # Force sqlite3.connect to raise an error to simulate broken database
+    with patch("sqlite3.connect", side_effect=sqlite3.OperationalError("Mocked DB error")):
+        agent = ReActAgent(client=mock_client, model="test-model")
+        # Running the agent should complete successfully without raising DB exception
+        result = await agent.run("Do something")
+        assert result.success is True
+        assert result.answer == "Done"

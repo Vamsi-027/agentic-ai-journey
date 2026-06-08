@@ -53,6 +53,33 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
             tags TEXT
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_runs (
+            run_id TEXT PRIMARY KEY,
+            task TEXT,
+            model TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            total_cost_usd REAL,
+            total_tokens INTEGER,
+            outcome TEXT,
+            error_msg TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_steps (
+            step_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT,
+            step_num INTEGER,
+            thought TEXT,
+            action TEXT,
+            action_input TEXT,
+            observation TEXT,
+            latency_ms INTEGER,
+            tokens_used INTEGER,
+            FOREIGN KEY(run_id) REFERENCES agent_runs(run_id)
+        )
+    """)
     conn.commit()
 
     # Run ALTER TABLE schema migrations if columns are missing
@@ -140,3 +167,99 @@ def get_results(experiment_id=None, run_id=None, db_path: str = DEFAULT_DB_PATH)
     df = pd.read_sql_query(query, conn, params=params or None)
     conn.close()
     return df
+
+
+class AgentTracer:
+    """Context manager for tracing agent execution runs and individual steps.
+    Never raises exceptions on database writes to ensure agent execution is never interrupted.
+    """
+    def __init__(self, task: str, model: str, db_path: Optional[str] = None):
+        import uuid
+        self.task = task
+        self.model = model
+        self.db_path = db_path or DEFAULT_DB_PATH
+        self.run_id = str(uuid.uuid4())
+        self.started_at = None
+        self.finished_at = None
+        self.total_cost_usd = 0.0
+        self.total_tokens = 0
+        self.outcome = "failure"
+        self.error_msg = None
+        self.step_num = 0
+
+    def __enter__(self):
+        from datetime import datetime, timezone
+        self.started_at = datetime.now(timezone.utc).isoformat()
+        try:
+            # Ensure tables are initialized
+            init_db(self.db_path)
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO agent_runs (run_id, task, model, started_at, total_cost_usd, total_tokens, outcome)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+                (self.run_id, self.task, self.model, self.started_at, 0.0, 0, "running")
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ AgentTracer DB Error on enter: {e}")
+        return self
+
+    def log_step(self, thought: str, action: str, action_input: str, observation: str, latency_ms: int, tokens_used: int):
+        self.step_num += 1
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO agent_steps (run_id, step_num, thought, action, action_input, observation, latency_ms, tokens_used)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    self.run_id,
+                    self.step_num,
+                    thought,
+                    action,
+                    action_input,
+                    observation,
+                    latency_ms,
+                    tokens_used
+                )
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ AgentTracer DB Error on log_step: {e}")
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        from datetime import datetime, timezone
+        self.finished_at = datetime.now(timezone.utc).isoformat()
+        if exc_type is not None:
+            self.outcome = "failure"
+            self.error_msg = f"{exc_type.__name__}: {str(exc_val)}"
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE agent_runs
+                SET finished_at = ?, total_cost_usd = ?, total_tokens = ?, outcome = ?, error_msg = ?
+                WHERE run_id = ?
+            """,
+                (
+                    self.finished_at,
+                    self.total_cost_usd,
+                    self.total_tokens,
+                    self.outcome,
+                    self.error_msg,
+                    self.run_id
+                )
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ AgentTracer DB Error on exit: {e}")
+
