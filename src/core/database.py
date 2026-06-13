@@ -80,6 +80,59 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
             FOREIGN KEY(run_id) REFERENCES agent_runs(run_id)
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS retrieval_benchmarks (
+            benchmark_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            model TEXT,
+            embedding_dimension INTEGER,
+            num_queries INTEGER,
+            top_1_accuracy REAL,
+            top_3_accuracy REAL,
+            mrr REAL,
+            avg_latency_ms REAL,
+            total_cost_usd REAL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS retrieval_benchmark_queries (
+            query_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            benchmark_id INTEGER,
+            query TEXT,
+            expected_chunk_id TEXT,
+            actual_rank_1_id TEXT,
+            actual_rank_2_id TEXT,
+            actual_rank_3_id TEXT,
+            rank_found INTEGER,
+            reciprocal_rank REAL,
+            score_diff_rank_1 REAL,
+            FOREIGN KEY(benchmark_id) REFERENCES retrieval_benchmarks(benchmark_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rag_indexing_logs (
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            directory_path TEXT,
+            extensions TEXT,
+            file_count INTEGER,
+            chunk_count INTEGER,
+            embedding_cost_usd REAL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rag_benchmark_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            condition TEXT,
+            task_id TEXT,
+            run_id TEXT,
+            steps INTEGER,
+            cost_usd REAL,
+            retrieval_calls INTEGER,
+            outcome TEXT,
+            duration_s REAL
+        )
+    """)
     conn.commit()
 
     # Run ALTER TABLE schema migrations if columns are missing
@@ -150,6 +203,37 @@ def log_result_to_db(
         ),
     )
     conn.commit()
+
+def log_rag_indexing(
+    db_path: str,
+    directory_path: str,
+    extensions: list[str],
+    file_count: int,
+    chunk_count: int,
+    embedding_cost_usd: float
+):
+    """Logs the results of a RAG indexing run into the SQLite database."""
+    import datetime
+    timestamp = datetime.datetime.now().isoformat()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO rag_indexing_logs (
+            timestamp, directory_path, extensions, file_count, chunk_count, embedding_cost_usd
+        ) VALUES (?, ?, ?, ?, ?, ?)
+    """,
+        (
+            timestamp,
+            directory_path,
+            json.dumps(extensions),
+            file_count,
+            chunk_count,
+            embedding_cost_usd
+        ),
+    )
+    conn.commit()
+    conn.close()
 
 def get_results(experiment_id=None, run_id=None, db_path: str = DEFAULT_DB_PATH):
     """Reads experiment results from the database, optionally filtering by experiment_id or run_id, returning a pandas DataFrame."""

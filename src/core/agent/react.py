@@ -3,6 +3,7 @@ import json
 import asyncio
 from typing import Optional, Union, Tuple
 from src.core.llm import BaseLLMClient, ToolDefinition
+from src.core.retrieval.rag_pipeline import RAGPipeline
 
 from dataclasses import dataclass
 
@@ -24,6 +25,8 @@ Rules:
 1. You MUST only output ONE Thought and ONE Action per turn. Never output multiple actions.
 2. The Action block arguments MUST be a valid JSON object. E.g. Action: write_file {"path": "test.txt", "content": "hello"}
 3. If you do not need to call any more tools, you MUST output 'Final Answer: <your final response>' to terminate the loop.
+4. When pytest returns Return Code: 0 for the target test, your very next output must be Final Answer. Do not write an intermediate thought or summary.
+5. You have access to a retrieve_context tool that searches the codebase for relevant code. Use it before reading files when you need to locate where something is implemented.
 
 Available Tools:
 {{TOOLS}}
@@ -149,11 +152,18 @@ class ReActAgent:
         model: Optional[str] = None,
         system_prompt: Optional[str] = None,
         max_steps: int = 10,
+        rag_pipeline: Optional[RAGPipeline] = None,
     ):
         self.client = client
         self.model = model
         self.system_prompt = system_prompt or REACT_SYSTEM_PROMPT_TEMPLATE
         self.max_steps = max_steps
+        self.rag_pipeline = rag_pipeline
+        
+        # If rag_pipeline is provided, register retrieve_context tool
+        if self.rag_pipeline:
+            from src.core.llm import RETRIEVE_CONTEXT_TOOL, retrieve_context
+            self.client.register_tool(RETRIEVE_CONTEXT_TOOL, retrieve_context)
 
     def _build_system_prompt(self) -> str:
         parts = []
@@ -189,6 +199,39 @@ class ReActAgent:
         )
 
         with AgentTracer(task=task, model=model_name) as tracer:
+            if self.rag_pipeline:
+                import os
+                import src.core.llm.tools
+                from src.core.config import settings
+                workspace_path = settings.WORKSPACE_ROOT
+                print(f"Indexing workspace root: {workspace_path}...")
+                start_time_idx = time.perf_counter()
+                chunk_count, embedding_cost = await self.rag_pipeline.index_directory(
+                    workspace_path, extensions=[".py"]
+                )
+                indexing_latency_ms = int((time.perf_counter() - start_time_idx) * 1000)
+                print(f"Indexed {chunk_count} chunks, cost: ${embedding_cost:.6f}")
+                
+                # Persist the freshly built index to disk so the retrieval tool can load it
+                index_base = os.path.join(workspace_path, "data", "codebase_index")
+                self.rag_pipeline.vector_store.save(index_base)
+                # Reset retrieve_context module-level cache to force reloading the new index
+                src.core.llm.tools._RAG_PIPELINE = None
+                print(f"Persisted freshly built codebase index to: {index_base}")
+                
+                # Log indexing run to the tracer
+                total_cost_usd += embedding_cost
+                tracer.total_cost_usd = total_cost_usd
+                tracer.log_step(
+                    thought="System setup: Indexing workspace directories for context retrieval.",
+                    action="index_directory",
+                    action_input=json.dumps({"workspace_path": workspace_path, "extensions": [".py"]}),
+                    observation=f"Indexed {chunk_count} chunks. Embedding cost: ${embedding_cost:.6f}",
+                    latency_ms=indexing_latency_ms,
+                    tokens_used=0
+                )
+
+
             for step in range(self.max_steps):
                 step_start_time = time.time()
                 print(f"\n🚀 === [AGENT STEP {step + 1}] ===")
@@ -447,7 +490,7 @@ class ReActAgent:
                 else str(self.model or "unknown-model")
             )
             success, reason = await evaluate_success(
-                self.client, task, result.answer, model=model_name
+                self.client, task, result.answer, steps=result.steps, model=model_name
             )
             print(
                 f"📊 Attempt {attempt} Evaluation: Success={success}, Reason={reason}"
@@ -469,18 +512,29 @@ class ReActAgent:
 
 
 async def evaluate_success(
-    client: BaseLLMClient, task: str, final_answer: str, model: Optional[str] = None
+    client: BaseLLMClient,
+    task: str,
+    final_answer: str,
+    steps: Optional[list[dict]] = None,
+    model: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Evaluates task completion using rule-based checks and an LLM-as-judge call.
     Returns (success, reason).
     """
-    lower_ans = final_answer.lower()
+    # 1. Rule-based checks for tests and errors in the last tool observation
+    last_observation = ""
+    if steps:
+        for step in reversed(steps):
+            obs = step.get("observation", "")
+            if obs:
+                last_observation = obs
+                break
 
-    # 1. Rule-based checks for tests and errors
-    if "return code: 1" in lower_ans or (
-        "fail" in lower_ans and ("pytest" in lower_ans or "test" in lower_ans)
+    lower_obs = last_observation.lower()
+    if "return code: 1" in lower_obs or (
+        "fail" in lower_obs and ("pytest" in lower_obs or "test" in lower_obs)
     ):
-        if "passed" not in lower_ans:
+        if "passed" not in lower_obs:
             return (
                 False,
                 "Rule-based check: Detected test failure or non-zero exit code in output.",
@@ -525,6 +579,23 @@ async def generate_reflection(
             "The agent failed before completing any steps. "
             "On the next attempt, start with list_directory to orient yourself, "
             "then read relevant source files before attempting any edits."
+        )
+
+    # Find the last non-empty tool observation
+    last_observation = ""
+    for s in reversed(steps):
+        obs = s.get("observation", "")
+        if obs:
+            last_observation = obs
+            break
+
+    lower_obs = last_observation.lower()
+    if "return code: 0" in lower_obs or "1 passed" in lower_obs:
+        return (
+            "The tests are already passing (Return Code: 0 / passed). "
+            "Your previous attempt successfully completed the task and passed the tests, "
+            "but did not output the Final Answer. "
+            "In this attempt, immediately output Final Answer to conclude the task."
         )
 
     trace_lines = []

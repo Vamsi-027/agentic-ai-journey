@@ -433,3 +433,50 @@ async def test_evaluate_success_with_surrounding_prose():
     success, reason = await evaluate_success(mock_client, "Math task", "4", model="test")
     assert success is True
     assert reason == "Math is fully correct."
+
+
+@pytest.mark.asyncio
+async def test_react_agent_with_rag_pipeline():
+    from src.core.retrieval.rag_pipeline import RAGPipeline
+    from src.core.llm import RETRIEVE_CONTEXT_TOOL
+    
+    # Mock LLM Client
+    mock_client = MagicMock(spec=BaseLLMClient)
+    mock_client.registry = {}
+    
+    # Store registration
+    def mock_register_tool(tool_def, func):
+        mock_client.registry[tool_def.name] = (tool_def, func)
+    mock_client.register_tool = mock_register_tool
+    
+    # Mock chat response
+    resp = LLMResponse(
+        text="Thought: Let's stop.\nFinal Answer: Complete.",
+        model="test-model",
+        input_tokens=10,
+        output_tokens=15,
+        cost_usd=0.01,
+        stop_reason="end_turn"
+    )
+    mock_client.chat = AsyncMock(return_value=resp)
+    
+    # Mock RAGPipeline
+    mock_pipeline = MagicMock(spec=RAGPipeline)
+    mock_pipeline.index_directory = AsyncMock(return_value=(42, 0.00084))
+    mock_pipeline.vector_store = MagicMock()
+    
+    agent = ReActAgent(
+        client=mock_client,
+        model="test-model",
+        rag_pipeline=mock_pipeline
+    )
+    
+    # Assert retrieve_context is registered
+    assert RETRIEVE_CONTEXT_TOOL.name in mock_client.registry
+    
+    # Run agent loop
+    result = await agent.run("Verify retrieval works.")
+    
+    # Assert index_directory was called
+    mock_pipeline.index_directory.assert_called_once()
+    assert result.success is True

@@ -241,3 +241,55 @@ class OpenAIClient(BaseLLMClient):
             is_final=True,
             stop_reason=response.choices[0].finish_reason
         )
+
+    @backoff.on_exception(
+        backoff.expo,
+        (openai.RateLimitError, openai.APIConnectionError, openai.APIStatusError),
+        max_tries=3,
+        jitter=backoff.full_jitter
+    )
+    async def get_embeddings(
+        self,
+        texts: list[str],
+        model: str = "text-embedding-3-small"
+    ) -> list[list[float]]:
+        """Fetch embeddings for a list of texts asynchronously using OpenAI's API."""
+        if not texts:
+            return []
+        response = await self.client.embeddings.create(
+            input=texts,
+            model=model
+        )
+        data = sorted(response.data, key=lambda x: x.index)
+        return [item.embedding for item in data]
+
+    @backoff.on_exception(
+        backoff.expo,
+        (openai.RateLimitError, openai.APIConnectionError, openai.APIStatusError),
+        max_tries=3,
+        jitter=backoff.full_jitter
+    )
+    async def get_embeddings_with_usage(
+        self,
+        texts: list[str],
+        model: str = "text-embedding-3-small"
+    ) -> tuple[list[list[float]], int, float]:
+        """Fetch embeddings and return (embeddings, total_tokens, cost_usd) for tracking."""
+        if not texts:
+            return [], 0, 0.0
+        response = await self.client.embeddings.create(
+            input=texts,
+            model=model
+        )
+        data = sorted(response.data, key=lambda x: x.index)
+        embeddings = [item.embedding for item in data]
+        total_tokens = response.usage.total_tokens
+        
+        # Calculate cost based on model
+        if "large" in model:
+            cost = (total_tokens / 1000.0) * 0.00013
+        else:
+            cost = (total_tokens / 1000.0) * 0.00002
+            
+        return embeddings, total_tokens, cost
+

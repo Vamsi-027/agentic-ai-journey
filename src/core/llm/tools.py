@@ -247,6 +247,25 @@ EDIT_FILE_TOOL = ToolDefinition(
     },
 )
 
+RETRIEVE_CONTEXT_TOOL = ToolDefinition(
+    name="retrieve_context",
+    description="Retrieve semantically relevant code chunks from the codebase index for a given search query.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The search query to match against indexed codebase chunks.",
+            },
+            "k": {
+                "type": "integer",
+                "description": "Optional number of results to return (default is 3).",
+            }
+        },
+        "required": ["query"],
+    },
+)
+
 
 # ==============================================================================
 # Tool Implementations
@@ -579,3 +598,38 @@ def edit_file(path: str, old_str: str, new_str: str) -> str:
         return f"File '{path}' edited successfully."
     except Exception as e:
         return f"Error editing file '{path}': {str(e)}"
+
+
+_RAG_PIPELINE = None
+
+
+async def retrieve_context(query: str, k: int = 3) -> str:
+    """Retrieve semantically relevant code chunks from the codebase index for a given search query.
+    Requires that the codebase index already exists at data/codebase_index.
+    """
+    global _RAG_PIPELINE
+    try:
+        if _RAG_PIPELINE is None:
+            from src.core.retrieval.vector_store import VectorStore
+            from src.core.retrieval.rag_pipeline import RAGPipeline
+            from src.core.llm.openai import OpenAIClient
+
+            index_base = os.path.join(settings.WORKSPACE_ROOT, "data", "codebase_index")
+            npz_path = index_base + ".npz"
+            json_path = index_base + ".json"
+            
+            if not (os.path.exists(npz_path) and os.path.exists(json_path)):
+                return (
+                    f"Error: Codebase index files not found at '{index_base}'. "
+                    f"Please run the indexing script to build the index before querying."
+                )
+                
+            store = VectorStore()
+            store.load(index_base)
+            client = OpenAIClient()
+            _RAG_PIPELINE = RAGPipeline(store, client)
+
+        return await _RAG_PIPELINE.retrieve_formatted(query, k=k)
+    except Exception as e:
+        return f"Error executing context retrieval: {str(e)}"
+

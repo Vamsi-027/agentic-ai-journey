@@ -20,6 +20,7 @@ from src.core.llm.tools import (
     LIST_DIRECTORY_TOOL,
     SEARCH_IN_FILES_TOOL,
     EDIT_FILE_TOOL,
+    RETRIEVE_CONTEXT_TOOL,
     write_file,
     read_file,
     run_python,
@@ -27,7 +28,8 @@ from src.core.llm.tools import (
     search_web,
     list_directory,
     search_in_files,
-    edit_file
+    edit_file,
+    retrieve_context
 )
 
 __all__ = [
@@ -50,6 +52,7 @@ __all__ = [
     "LIST_DIRECTORY_TOOL",
     "SEARCH_IN_FILES_TOOL",
     "EDIT_FILE_TOOL",
+    "RETRIEVE_CONTEXT_TOOL",
     "write_file",
     "read_file",
     "run_python",
@@ -57,7 +60,8 @@ __all__ = [
     "search_web",
     "list_directory",
     "search_in_files",
-    "edit_file"
+    "edit_file",
+    "retrieve_context"
 ]
 
 def get_llm_client(
